@@ -102,33 +102,49 @@ class AudioServer(asyncio.DatagramProtocol):
                     continue
                 async with self._lock:
                     # gather one chunk per user if available
-                    contributor_arrays = []
-                    for user in list(self._buffers.keys()):
-                        buffer = self._buffers[user]
+                    contributions: Dict[str, np.ndarray] = {}
+                    max_len = 0
+                    for user, buffer in list(self._buffers.items()):
                         if buffer:
-                            contributor_arrays.append(buffer.popleft())
-                    if not contributor_arrays:
+                            chunk = buffer.popleft()
+                            contributions[user] = chunk
+                            if chunk.size > max_len:
+                                max_len = chunk.size
+                    if not contributions or max_len == 0:
                         continue
-                max_len = max(arr.size for arr in contributor_arrays)
-                mix = np.zeros(max_len, dtype=np.float32)
-                for arr in contributor_arrays:
-                    if arr.size < max_len:
-                        padded = np.zeros(max_len, dtype=np.float32)
-                        padded[: arr.size] = arr
-                        mix += padded
+
+                # Normalize chunks to a common length for mixing
+                padded: Dict[str, np.ndarray] = {}
+                for user, chunk in contributions.items():
+                    if chunk.size == max_len:
+                        padded[user] = chunk
                     else:
-                        mix[: arr.size] += arr
-                mix /= max(1, len(contributor_arrays))
-                payload = mix.astype(np.float32).tobytes()
-                self._sequence = (self._sequence + 1) % (2**31)
-                header = MediaFrameHeader(
-                    stream_id=1,
-                    sequence_number=self._sequence,
-                    timestamp_ms=0.0,
-                    payload_type=PayloadType.AUDIO.value,
-                ).pack()
-                datagram = header + payload
+                        pad = np.zeros(max_len, dtype=np.float32)
+                        pad[: chunk.size] = chunk
+                        padded[user] = pad
+
                 for target in targets:
+                    username = self._clients.get(target)
+                    if not username:
+                        continue
+                    others = [audio for user, audio in padded.items() if user != username]
+                    if not others:
+                        mixed = np.zeros(max_len, dtype=np.float32)
+                    else:
+                        mixed = np.zeros(max_len, dtype=np.float32)
+                        for audio in others:
+                            mixed += audio
+                        mixed /= len(others)
+
+                    payload = mixed.astype(np.float32).tobytes()
+                    self._sequence = (self._sequence + 1) % (2**31)
+                    header = MediaFrameHeader(
+                        stream_id=1,
+                        sequence_number=self._sequence,
+                        timestamp_ms=0.0,
+                        payload_type=PayloadType.AUDIO.value,
+                    ).pack()
+                    datagram = header + payload
                     try:
                         self._transport and self._transport.sendto(datagram, target)
                     except Exception:
