@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LAN Collaboration Suite</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header>
+        <h1>LAN Collaboration Suite</h1>
+        <div class="status" id="status">Connecting…</div>
+      </header>
+      <main>
+        <section class="video-grid">
+          <h2>Video Feeds</h2>
+          <div class="grid" id="video-grid">
+            <p class="placeholder">Video module coming soon…</p>
+          </div>
+        </section>
+        <section class="chat-panel">
+          <h2>Group Chat</h2>
+          <div class="messages" id="chat-messages"></div>
+          <form id="chat-form">
+            <input type="text" id="chat-input" placeholder="Type a message" autocomplete="off" />
+            <button type="submit">Send</button>
+          </form>
+        </section>
+        <section class="sidebar">
+          <div class="module">
+            <h3>Screen Sharing</h3>
+            <button id="start-screen">Start Sharing</button>
+            <button id="stop-screen" disabled>Stop Sharing</button>
+            <div id="screen-preview" class="screen-preview">No presenter</div>
+          </div>
+          <div class="module">
+            <h3>File Sharing</h3>
+            <input type="file" id="file-input" />
+            <button id="upload-file">Upload</button>
+            <ul id="file-list"></ul>
+          </div>
+          <div class="module">
+            <h3>Participants</h3>
+            <ul id="participant-list"></ul>
+          </div>
+        </section>
+      </main>
+    </div>
+  <script src="/assets/main.js" type="module"></script>
+  </body>
+</html>

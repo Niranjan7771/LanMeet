@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lan_collaboration_suite"
+version = "0.1.0"
+description = "LAN-only multi-user collaboration platform with audio/video, screen sharing, chat, and file transfer"
+readme = "README.md"
+authors = [
+    {name = "Niranjan", email = "cs23b1076@iiitdm.ac.in"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    "aiofiles>=23.2",
+    "anyio>=4.4",
+    "av>=11.0",
+    "fastapi>=0.111",
+    "jinja2>=3.1",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
+    "pydantic>=2.7",
+    "python-multipart>=0.0.9",
+    "sounddevice>=0.5",
+    "uvicorn[standard]>=0.30",
+    "websockets>=12.0",
+    "mss>=9.0",
+]
+
+[project.optional-dependencies]
+development = [
+    "black>=24.4",
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[tool.setuptools]
+packages = ["client", "server", "shared"]
+
+[tool.setuptools.package-data]
+client = ["../webui/*"]
+server = []
+shared = []
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "B", "I"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

@@ -1,0 +1,60 @@
+Metadata-Version: 2.4
+Name: lan_collaboration_suite
+Version: 0.1.0
+Summary: LAN-only multi-user collaboration platform with audio/video, screen sharing, chat, and file transfer
+Author-email: Your Name <you@example.com>
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: aiofiles>=23.2
+Requires-Dist: anyio>=4.4
+Requires-Dist: av>=11.0
+Requires-Dist: fastapi>=0.111
+Requires-Dist: jinja2>=3.1
+Requires-Dist: numpy>=1.26
+Requires-Dist: opencv-python>=4.9
+Requires-Dist: pydantic>=2.7
+Requires-Dist: python-multipart>=0.0.9
+Requires-Dist: sounddevice>=0.5
+Requires-Dist: uvicorn[standard]>=0.30
+Requires-Dist: websockets>=12.0
+Provides-Extra: development
+Requires-Dist: black>=24.4; extra == "development"
+Requires-Dist: mypy>=1.10; extra == "development"
+Requires-Dist: pytest>=8.2; extra == "development"
+Requires-Dist: ruff>=0.5; extra == "development"
+
+# LAN Collaboration Suite
+
+A LAN-only collaboration platform that provides real-time multi-user audio/video conferencing, screen sharing, group chat, and file transfer without any internet connectivity. The project is built with Python for the networking stack and a web-based user interface served from the client application.
+
+## Features (Planned)
+
+- **Multi-user video conferencing** over UDP with compressed JPEG frames.
+- **Multi-user audio conferencing** over UDP with low-latency Opus-like streaming.
+- **Slide & screen sharing** using reliable TCP streams.
+- **Group text chat** over TCP with persistent history per session.
+- **File sharing** with resumable uploads/downloads and progress reporting.
+
+## Repository Layout
+
+```
+server/      # Core server application managing sessions and media routing
+client/      # Client runtime and web UI host
+shared/      # Shared protocol definitions and utilities
+webui/       # HTML/CSS/JS assets for the client interface
+docs/        # Architecture and user documentation
+tests/       # Automated tests
+```
+
+## Getting Started
+
+> **Status:** Early scaffolding. Media streaming modules are under active development.
+
+1. Create and activate a virtual environment (Python 3.10+).
+2. Install dependencies: `pip install -e .[development]`.
+3. Run the server: `python -m server` (once implemented).
+4. Run the client: `python -m client` (once implemented).
+
+## License
+
+TBD.
