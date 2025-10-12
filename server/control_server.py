@@ -87,6 +87,7 @@ class ControlServer:
                     file_offers = []
                     if self._file_server:
                         file_offers = [offer.to_dict() for offer in await self._file_server.list_files()]
+                    presenter = await self._session_manager.get_presenter()
                     writer.write(
                         encode_control_message(
                             ControlAction.WELCOME,
@@ -96,6 +97,7 @@ class ControlServer:
                                 "peers": await self._session_manager.list_clients(),
                                 "files": file_offers,
                                 "media": self._media_config,
+                                "presenter": presenter,
                             },
                         )
                     )

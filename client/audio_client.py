@@ -44,6 +44,7 @@ class AudioClient:
         self._play_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=32)
         self._sequence = 0
         self._running = threading.Event()
+        self._capture_enabled = False
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -54,6 +55,7 @@ class AudioClient:
 
     async def stop(self) -> None:
         self._running.clear()
+        self._capture_enabled = False
         if self._capture_stream:
             self._capture_stream.stop()
             self._capture_stream.close()
@@ -85,7 +87,12 @@ class AudioClient:
         self._play_stream.start()
 
     def _capture_callback(self, indata, frames, time_info, status) -> None:  # pragma: no cover - audio callback
-        if not self._running.is_set() or self._transport is None or self._loop is None:
+        if (
+            not self._running.is_set()
+            or self._transport is None
+            or self._loop is None
+            or not self._capture_enabled
+        ):
             return
         if status:
             logger.warning("Audio input status: %s", status)
@@ -153,3 +160,7 @@ class AudioClient:
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) % (2**31)
         return self._sequence
+
+    def set_capture_enabled(self, enabled: bool) -> None:
+        """Enable or disable microphone capture without stopping playback."""
+        self._capture_enabled = enabled

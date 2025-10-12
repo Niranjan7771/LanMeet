@@ -61,6 +61,7 @@ class VideoClient:
         self._stop_event = asyncio.Event()
         self._sequence = 0
         self._peers: Dict[int, str] = {}
+        self._capture_enabled = False
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -74,6 +75,7 @@ class VideoClient:
         if self._capture_task:
             await self._capture_task
             self._capture_task = None
+        self._capture_enabled = False
         if self._transport:
             self._transport.close()
             self._transport = None
@@ -115,6 +117,9 @@ class VideoClient:
         try:
             frame_interval = 1 / self._fps
             while not self._stop_event.is_set():
+                if not self._capture_enabled:
+                    await asyncio.sleep(0.2)
+                    continue
                 frame = await asyncio.to_thread(self._read_frame, cap)
                 if frame is None:
                     continue
@@ -144,3 +149,6 @@ class VideoClient:
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) % (2**31)
         return self._sequence
+
+    def set_capture_enabled(self, enabled: bool) -> None:
+        self._capture_enabled = enabled

@@ -5,13 +5,57 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LAN Collaboration Suite</title>
-  <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
+    <div id="join-overlay" class="join-overlay">
+      <div class="join-card">
+        <div id="join-section">
+          <h2>Join the Collaboration</h2>
+          <p class="hint">Pick a display name or randomize one to jump in.</p>
+          <form id="join-form">
+            <input type="text" id="name-input" placeholder="Display name" autocomplete="off" />
+            <div class="actions">
+              <button type="button" id="random-name" class="secondary">Randomize</button>
+              <button type="submit" class="primary">Join Session</button>
+            </div>
+          </form>
+          <div class="join-status" id="join-status">Idle</div>
+        </div>
+        <div id="leave-confirm" class="leave-confirm hidden">
+          <h2>Leaving the Session</h2>
+          <p class="hint">You'll disconnect in <span id="leave-countdown">20</span> seconds. Cancel if this was a mistake.</p>
+          <div class="actions">
+            <button type="button" id="cancel-leave" class="secondary">Stay Connected</button>
+            <button type="button" id="confirm-leave" class="danger">Leave Now</button>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="app-shell">
-      <header>
-        <h1>LAN Collaboration Suite</h1>
-        <div class="status" id="status">Connecting…</div>
+      <header class="app-header">
+        <div>
+          <h1>LAN Collaboration Suite</h1>
+          <div class="status" id="status">Offline</div>
+        </div>
+        <div class="control-bar">
+          <button id="toggle-mic" class="control-button" disabled>
+            <span class="icon">🎤</span>
+            <span class="label">Mic Off</span>
+          </button>
+          <button id="toggle-video" class="control-button" disabled>
+            <span class="icon">🎥</span>
+            <span class="label">Camera Off</span>
+          </button>
+          <button id="toggle-present" class="control-button" disabled>
+            <span class="icon">🖥️</span>
+            <span class="label">Share Screen</span>
+          </button>
+          <button id="leave-session" class="control-button danger" disabled>
+            <span class="icon">🚪</span>
+            <span class="label">Leave</span>
+          </button>
+        </div>
       </header>
       <main>
         <section class="video-grid">
@@ -31,8 +75,6 @@
         <section class="sidebar">
           <div class="module">
             <h3>Screen Sharing</h3>
-            <button id="start-screen">Start Sharing</button>
-            <button id="stop-screen" disabled>Stop Sharing</button>
             <div id="screen-preview" class="screen-preview">No presenter</div>
           </div>
           <div class="module">
@@ -48,6 +90,6 @@
         </section>
       </main>
     </div>
-  <script src="/assets/main.js" type="module"></script>
+    <script src="/assets/main.js" type="module"></script>
   </body>
 </html>

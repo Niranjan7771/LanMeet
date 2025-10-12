@@ -18,6 +18,7 @@ class ConnectedClient:
     username: str
     writer: asyncio.StreamWriter
     last_seen: float = field(default_factory=lambda: time.monotonic())
+    connected_at: float = field(default_factory=lambda: time.time())
     is_presenter: bool = False
 
     def touch(self) -> None:
@@ -36,6 +37,7 @@ class SessionManager:
         self._lock = asyncio.Lock()
         self._presenter: Optional[str] = None
         self._chat_history: list[ChatMessage] = []
+        self._event_log: list[dict] = []
 
     async def register(self, username: str, writer: asyncio.StreamWriter) -> ConnectedClient:
         async with self._lock:
@@ -44,6 +46,12 @@ class SessionManager:
             client = ConnectedClient(username=username, writer=writer)
             self._clients[username] = client
             logger.info("Registered client %s", username)
+            self._record_event(
+                "user_joined",
+                {
+                    "username": username,
+                },
+            )
             return client
 
     async def unregister(self, username: str) -> None:
@@ -57,6 +65,12 @@ class SessionManager:
                 except Exception:  # pragma: no cover - cleanup best effort
                     logger.exception("Error while closing writer for %s", username)
                 logger.info("Unregistered client %s", username)
+                self._record_event(
+                    "user_left",
+                    {
+                        "username": username,
+                    },
+                )
 
     async def grant_presenter(self, username: str) -> bool:
         async with self._lock:
@@ -68,6 +82,12 @@ class SessionManager:
                 return False
             self._presenter = username
             self._clients[username].is_presenter = True
+            self._record_event(
+                "presenter_granted",
+                {
+                    "username": username,
+                },
+            )
             return True
 
     async def revoke_presenter(self, username: str) -> None:
@@ -77,6 +97,12 @@ class SessionManager:
             client = self._clients.get(username)
             if client:
                 client.is_presenter = False
+            self._record_event(
+                "presenter_revoked",
+                {
+                    "username": username,
+                },
+            )
 
     async def get_presenter(self) -> Optional[str]:
         async with self._lock:
@@ -117,6 +143,13 @@ class SessionManager:
             self._chat_history.append(chat)
             if len(self._chat_history) > 200:
                 self._chat_history.pop(0)
+            self._record_event(
+                "chat_message",
+                {
+                    "sender": chat.sender,
+                    "message": chat.message,
+                },
+            )
 
     async def get_chat_history(self) -> list[ChatMessage]:
         async with self._lock:
@@ -125,6 +158,27 @@ class SessionManager:
     async def list_clients(self) -> list[str]:
         async with self._lock:
             return list(self._clients.keys())
+
+    async def snapshot(self) -> dict:
+        async with self._lock:
+            now_monotonic = time.monotonic()
+            clients = [
+                {
+                    "username": client.username,
+                    "last_seen_seconds": max(0.0, now_monotonic - client.last_seen),
+                    "connected_at": client.connected_at,
+                    "is_presenter": client.is_presenter,
+                }
+                for client in self._clients.values()
+            ]
+            chat_history = [msg.to_dict() for msg in self._chat_history]
+            events = list(self._event_log[-300:])
+            return {
+                "clients": clients,
+                "presenter": self._presenter,
+                "chat_history": chat_history,
+                "events": events,
+            }
 
     async def heartbeat_watcher(self) -> None:
         while True:
@@ -146,3 +200,13 @@ class SessionManager:
             client = self._clients.get(username)
             if client:
                 client.touch()
+
+    def _record_event(self, event_type: str, details: Dict[str, object]) -> None:
+        event = {
+            "type": event_type,
+            "timestamp": time.time(),
+            "details": details,
+        }
+        self._event_log.append(event)
+        if len(self._event_log) > 1000:
+            self._event_log.pop(0)

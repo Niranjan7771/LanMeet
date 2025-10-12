@@ -21,6 +21,7 @@ from .file_server import FileServer
 from .screen_server import ScreenServer
 from .video_server import VideoServer
 from .session_manager import SessionManager
+from .admin_dashboard import AdminServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +43,14 @@ async def main() -> None:
         type=Path,
         default=Path("server_storage"),
         help="Directory for temporary file storage",
+    )
+    parser.add_argument("--admin-host", default="127.0.0.1", help="Host for the admin dashboard server")
+    parser.add_argument("--admin-port", type=int, default=8700, help="Port for the admin dashboard server")
+    parser.add_argument(
+        "--admin-static",
+        type=Path,
+        default=Path("adminui"),
+        help="Path to admin dashboard static assets",
     )
     args = parser.parse_args()
 
@@ -65,6 +74,13 @@ async def main() -> None:
     )
     screen_server = ScreenServer(args.host, args.screen_port, session_manager)
 
+    admin_server = AdminServer(
+        session_manager,
+        host=args.admin_host,
+        port=args.admin_port,
+        static_root=args.admin_static,
+    )
+
     stop_event = asyncio.Event()
 
     def _signal_handler() -> None:
@@ -83,6 +99,7 @@ async def main() -> None:
     await file_server.start()
     await video_server.start(args.host, args.video_port)
     await audio_server.start(args.host, args.audio_port)
+    await admin_server.start()
 
     heartbeat_task = asyncio.create_task(session_manager.heartbeat_watcher())
 
@@ -94,6 +111,7 @@ async def main() -> None:
     await file_server.stop()
     await video_server.stop()
     await audio_server.stop()
+    await admin_server.stop()
 
 
 if __name__ == "__main__":

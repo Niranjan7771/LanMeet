@@ -2,31 +2,112 @@ const statusEl = document.getElementById("status");
 const chatMessagesEl = document.getElementById("chat-messages");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
+const chatSendBtn = chatForm.querySelector("button");
 const participantListEl = document.getElementById("participant-list");
 const fileListEl = document.getElementById("file-list");
 const uploadButton = document.getElementById("upload-file");
 const fileInput = document.getElementById("file-input");
-const startScreenBtn = document.getElementById("start-screen");
-const stopScreenBtn = document.getElementById("stop-screen");
 const screenPreviewEl = document.getElementById("screen-preview");
 const videoGridEl = document.getElementById("video-grid");
 
+const joinOverlay = document.getElementById("join-overlay");
+const joinForm = document.getElementById("join-form");
+const nameInput = document.getElementById("name-input");
+const randomNameBtn = document.getElementById("random-name");
+const joinStatusEl = document.getElementById("join-status");
+const joinButton = joinForm.querySelector(".primary");
+
+const micToggleBtn = document.getElementById("toggle-mic");
+const videoToggleBtn = document.getElementById("toggle-video");
+const presentToggleBtn = document.getElementById("toggle-present");
+const leaveButton = document.getElementById("leave-session");
+const leaveCountdownEl = document.getElementById("leave-countdown");
+const leaveSection = document.getElementById("leave-confirm");
+const joinSection = document.getElementById("join-section");
+const cancelLeaveBtn = document.getElementById("cancel-leave");
+const confirmLeaveBtn = document.getElementById("confirm-leave");
+
 let socket;
+let socketReady = false;
 let participants = new Set();
 let files = new Map();
 let currentUsername = null;
 let currentPresenter = null;
+let joined = false;
+let micEnabled = false;
+let videoEnabled = false;
 const videoElements = new Map();
+let leaveTimerId = null;
+let leaveDeadlineMs = null;
+const LEAVE_GRACE_PERIOD_MS = 20000;
+
+function init() {
+  setConnectedUi(false);
+  joinButton.disabled = true;
+  fetchConfig();
+  connectSocket();
+}
+
+async function fetchConfig() {
+  try {
+    const response = await fetch("/api/config", { cache: "no-store" });
+    if (!response.ok) throw new Error("config fetch failed");
+    const data = await response.json();
+    if (data.prefill_username) {
+      nameInput.value = data.prefill_username;
+    } else {
+      await requestRandomName();
+    }
+  } catch (error) {
+    console.warn("Unable to load client config", error);
+    await requestRandomName();
+  }
+}
+
+async function requestRandomName() {
+  try {
+    const response = await fetch("/api/random-name", { cache: "no-store" });
+    if (!response.ok) throw new Error("random name failed");
+    const data = await response.json();
+    if (data.username) {
+      nameInput.value = data.username;
+      return;
+    }
+  } catch (error) {
+    console.warn("Random name generation failed", error);
+  }
+  nameInput.value = generateLocalName();
+}
+
+function generateLocalName() {
+  const adjectives = ["swift", "bright", "lively", "bold", "stellar", "brisk", "clever"];
+  const nouns = ["lynx", "sparrow", "otter", "falcon", "fox", "orca", "aurora"];
+  return `${pick(adjectives)}-${pick(nouns)}-${Math.floor(Math.random() * 900 + 100)}`;
+}
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
 
 function connectSocket() {
   socket = new WebSocket(`ws://${window.location.host}/ws/control`);
   socket.addEventListener("open", () => {
-    statusEl.textContent = "Connected";
-    statusEl.classList.remove("error");
+    socketReady = true;
+    joinButton.disabled = false;
+    if (!joined) {
+      setJoinStatus("Ready to join", false);
+      joinOverlay.classList.remove("hidden");
+    }
+    updateStatusLine();
   });
   socket.addEventListener("close", () => {
-    statusEl.textContent = "Disconnected. Reconnecting…";
-    statusEl.classList.add("error");
+    socketReady = false;
+    joined = false;
+    joinButton.disabled = true;
+    setConnectedUi(false);
+    setJoinStatus("Reconnecting to client service…", true);
+    joinOverlay.classList.remove("hidden");
+    updateStatusLine("Disconnected. Attempting to reconnect…");
     setTimeout(connectSocket, 2000);
   });
   socket.addEventListener("message", (event) => {
@@ -36,16 +117,24 @@ function connectSocket() {
 }
 
 function sendControl(type, payload = {}) {
-  socket?.send(
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    console.warn("Socket not ready for", type);
+    return false;
+  }
+  socket.send(
     JSON.stringify({
       type,
       payload,
     })
   );
+  return true;
 }
 
 function handleServerEvent(type, payload) {
   switch (type) {
+    case "session_status":
+      handleSessionStatus(payload || {});
+      break;
     case "welcome":
       initState(payload);
       break;
@@ -63,20 +152,11 @@ function handleServerEvent(type, payload) {
       removeVideoTile(payload.username);
       break;
     case "presenter_granted":
-      currentPresenter = payload.username;
-      if (currentPresenter === currentUsername) {
-        startScreenBtn.disabled = true;
-        stopScreenBtn.disabled = false;
-      } else {
-        startScreenBtn.disabled = false;
-        stopScreenBtn.disabled = true;
-      }
+      setPresenterState(payload.username);
       break;
     case "presenter_revoked":
       if (currentPresenter === payload.username) {
-        currentPresenter = null;
-        startScreenBtn.disabled = false;
-        stopScreenBtn.disabled = true;
+        setPresenterState(null);
         screenPreviewEl.innerHTML = "Presenter stopped";
       }
       break;
@@ -103,17 +183,110 @@ function handleServerEvent(type, payload) {
     case "video_frame":
       updateVideoTile(payload.username, payload.frame);
       break;
+    case "state_snapshot":
+      handleStateSnapshot(payload);
+      break;
     default:
       console.debug("Unhandled event", type, payload);
   }
 }
 
+function handleSessionStatus({ state, username, message }) {
+  switch (state) {
+    case "idle":
+      resetLeaveFlow();
+      joined = false;
+      micEnabled = false;
+      videoEnabled = false;
+      setConnectedUi(false);
+      updateStatusLine();
+      joinButton.disabled = !socketReady;
+      setJoinStatus(socketReady ? "Ready to join" : "Waiting for client service…", !socketReady);
+      joinOverlay.classList.remove("hidden");
+      if (username) {
+        currentUsername = username;
+        nameInput.value = username;
+      }
+      updateControlButtons();
+      break;
+    case "connecting":
+      resetLeaveFlow();
+      joinButton.disabled = true;
+      setJoinStatus(`Connecting as ${username}…`, false);
+      joinOverlay.classList.remove("hidden");
+      break;
+    case "connected":
+      resetLeaveFlow();
+      joined = true;
+      currentUsername = username || currentUsername;
+      joinButton.disabled = false;
+      joinOverlay.classList.add("hidden");
+      setConnectedUi(true);
+      setJoinStatus("Connected", false);
+      updateStatusLine();
+      updateControlButtons();
+      break;
+    case "disconnecting":
+      setConnectedUi(false);
+      joinButton.disabled = true;
+      joinOverlay.classList.remove("hidden");
+      setJoinStatus(`Disconnecting as ${username || currentUsername || ""}…`, false);
+      updateControlButtons();
+      break;
+    case "error":
+      resetLeaveFlow();
+      joined = false;
+      micEnabled = false;
+      videoEnabled = false;
+      setConnectedUi(false);
+      joinOverlay.classList.remove("hidden");
+      joinButton.disabled = false;
+      setJoinStatus(message ? `Error: ${message}` : "Unable to connect", true);
+      updateStatusLine("Error establishing session");
+      updateControlButtons();
+      break;
+    default:
+      break;
+  }
+}
+
+function setJoinStatus(text, isError) {
+  joinStatusEl.textContent = text;
+  joinStatusEl.classList.toggle("error", Boolean(isError));
+}
+
+function updateStatusLine(fallback) {
+  if (!joined || !currentUsername) {
+    statusEl.textContent = fallback || (socketReady ? "Offline" : "Connecting…");
+    statusEl.classList.toggle("error", !socketReady);
+    return;
+  }
+  const pieces = [`Connected as ${currentUsername}`];
+  if (currentPresenter) {
+    pieces.push(`Presenter: ${currentPresenter}`);
+  }
+  statusEl.textContent = pieces.join(" • ");
+  statusEl.classList.remove("error");
+}
+
+function setConnectedUi(enabled) {
+  chatInput.disabled = !enabled;
+  chatSendBtn.disabled = !enabled;
+  uploadButton.disabled = !enabled;
+  fileInput.disabled = !enabled;
+  micToggleBtn.disabled = !enabled;
+  videoToggleBtn.disabled = !enabled;
+  presentToggleBtn.disabled = !enabled;
+  leaveButton.disabled = !enabled;
+}
+
 function initState(payload) {
-  statusEl.textContent = `Connected as ${payload.username}`;
-  participants = new Set(payload.peers || []);
+  joined = true;
   currentUsername = payload.username;
-  startScreenBtn.disabled = false;
-  stopScreenBtn.disabled = true;
+  micEnabled = false;
+  videoEnabled = false;
+  updateStatusLine();
+  participants = new Set(payload.peers || []);
   renderParticipants();
   chatMessagesEl.innerHTML = "";
   (payload.chat_history || []).forEach((msg) => appendChatMessage(msg));
@@ -125,8 +298,46 @@ function initState(payload) {
   sendControl("file_request_list");
   videoElements.clear();
   videoGridEl.innerHTML = "";
-  participants.forEach((username) => ensureVideoTile(username));
+  participants.forEach((name) => ensureVideoTile(name));
   ensureVideoTile(currentUsername);
+  resetLeaveFlow();
+  updateControlButtons();
+}
+
+function handleStateSnapshot(snapshot) {
+  if (!snapshot || !snapshot.connected) {
+    return;
+  }
+  joined = true;
+  currentUsername = snapshot.username || currentUsername;
+  if (currentUsername) {
+    nameInput.value = currentUsername;
+  }
+  participants = new Set(snapshot.peers || []);
+  renderParticipants();
+  chatMessagesEl.innerHTML = "";
+  (snapshot.chat_history || []).forEach((msg) => appendChatMessage(msg));
+  files = new Map();
+  (snapshot.files || []).forEach((file) => {
+    if (file.file_id) {
+      files.set(file.file_id, file);
+    }
+  });
+  renderFiles();
+  const media = snapshot.media || {};
+  micEnabled = Boolean(media.audio_enabled);
+  videoEnabled = Boolean(media.video_enabled);
+  setPresenterState(snapshot.presenter || null);
+  updateControlButtons();
+  videoElements.clear();
+  videoGridEl.innerHTML = "";
+  participants.forEach((name) => ensureVideoTile(name));
+  ensureVideoTile(currentUsername);
+  setConnectedUi(true);
+  leaveButton.disabled = false;
+  joinOverlay.classList.add("hidden");
+  updateStatusLine();
+  sendControl("file_request_list");
 }
 
 function appendChatMessage({ sender, message, timestamp_ms }) {
@@ -199,10 +410,7 @@ function handleScreenControl({ state, username }) {
 }
 
 function handleScreenFrame({ frame, username }) {
-  if (username === currentUsername) {
-    return;
-  }
-  if (!frame) {
+  if (username === currentUsername || !frame) {
     return;
   }
   if (!screenPreviewEl.querySelector("img")) {
@@ -270,24 +478,104 @@ function formatBytes(size) {
   return `${value.toFixed(1)} ${units[idx]}`;
 }
 
+function updateControlButtons() {
+  micToggleBtn.classList.toggle("active", micEnabled);
+  micToggleBtn.querySelector(".label").textContent = micEnabled ? "Mic On" : "Mic Off";
+  videoToggleBtn.classList.toggle("active", videoEnabled);
+  videoToggleBtn.querySelector(".label").textContent = videoEnabled ? "Camera On" : "Camera Off";
+  const isPresenter = currentPresenter && currentPresenter === currentUsername;
+  presentToggleBtn.classList.toggle("active", Boolean(isPresenter));
+  presentToggleBtn.querySelector(".label").textContent = isPresenter ? "Stop Sharing" : "Share Screen";
+}
+
+function setPresenterState(username) {
+  currentPresenter = username;
+  updateStatusLine();
+  updateControlButtons();
+}
+
+function resetLeaveFlow() {
+  if (leaveTimerId) {
+    clearTimeout(leaveTimerId);
+    leaveTimerId = null;
+  }
+  leaveDeadlineMs = null;
+  leaveSection.classList.add("hidden");
+  joinSection.classList.remove("hidden");
+  leaveCountdownEl.textContent = Math.round(LEAVE_GRACE_PERIOD_MS / 1000).toString();
+}
+
+function beginLeaveCountdown() {
+  if (!joined || leaveButton.disabled) {
+    return;
+  }
+  setConnectedUi(false);
+  leaveButton.disabled = true;
+  leaveDeadlineMs = Date.now() + LEAVE_GRACE_PERIOD_MS;
+  joinOverlay.classList.remove("hidden");
+  joinSection.classList.add("hidden");
+  leaveSection.classList.remove("hidden");
+  updateLeaveCountdown();
+}
+
+function updateLeaveCountdown() {
+  if (leaveDeadlineMs === null) {
+    return;
+  }
+  const remainingMs = leaveDeadlineMs - Date.now();
+  if (remainingMs <= 0) {
+    confirmLeave(true);
+    return;
+  }
+  const seconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  leaveCountdownEl.textContent = seconds.toString();
+  leaveTimerId = setTimeout(updateLeaveCountdown, 250);
+}
+
+function cancelLeaveCountdown() {
+  if (!joined) {
+    return;
+  }
+  resetLeaveFlow();
+  joinOverlay.classList.add("hidden");
+  setConnectedUi(true);
+  leaveButton.disabled = false;
+  updateControlButtons();
+}
+
+function confirmLeave(autoTriggered = false) {
+  if (leaveTimerId) {
+    clearTimeout(leaveTimerId);
+    leaveTimerId = null;
+  }
+  if (leaveDeadlineMs === null && !autoTriggered) {
+    return;
+  }
+  leaveDeadlineMs = null;
+  leaveSection.classList.add("hidden");
+  joinSection.classList.remove("hidden");
+  joinOverlay.classList.remove("hidden");
+  joined = false;
+  micEnabled = false;
+  videoEnabled = false;
+  setConnectedUi(false);
+  const accepted = sendControl("leave_session", { force: true, auto: autoTriggered });
+  setJoinStatus(accepted ? "Disconnecting…" : "Unable to signal disconnect", !accepted);
+  updateControlButtons();
+  updateStatusLine("Disconnecting…");
+}
+
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (!joined) return;
   const message = chatInput.value.trim();
   if (!message) return;
   sendControl("chat_send", { message });
   chatInput.value = "";
 });
 
-startScreenBtn.addEventListener("click", () => {
-  sendControl("request_presenter");
-});
-
-stopScreenBtn.addEventListener("click", () => {
-  sendControl("release_presenter");
-});
-
 uploadButton.addEventListener("click", async () => {
-  if (!fileInput.files?.length) return;
+  if (!joined || !fileInput.files?.length) return;
   const data = new FormData();
   data.append("file", fileInput.files[0]);
   try {
@@ -300,4 +588,53 @@ uploadButton.addEventListener("click", async () => {
   }
 });
 
-connectSocket();
+joinForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!socketReady) {
+    setJoinStatus("Waiting for client service…", true);
+    return;
+  }
+  const desiredName = nameInput.value.trim();
+  if (!desiredName) {
+    setJoinStatus("Please enter a name", true);
+    nameInput.focus();
+    return;
+  }
+  joinButton.disabled = true;
+  setJoinStatus(`Connecting as ${desiredName}…`, false);
+  const accepted = sendControl("join", { username: desiredName });
+  if (!accepted) {
+    joinButton.disabled = false;
+    setJoinStatus("Connection lost. Retrying…", true);
+  }
+});
+
+randomNameBtn.addEventListener("click", () => {
+  requestRandomName();
+});
+
+micToggleBtn.addEventListener("click", () => {
+  if (micToggleBtn.disabled) return;
+  micEnabled = !micEnabled;
+  updateControlButtons();
+  sendControl("toggle_audio", { enabled: micEnabled });
+});
+
+videoToggleBtn.addEventListener("click", () => {
+  if (videoToggleBtn.disabled) return;
+  videoEnabled = !videoEnabled;
+  updateControlButtons();
+  sendControl("toggle_video", { enabled: videoEnabled });
+});
+
+presentToggleBtn.addEventListener("click", () => {
+  if (presentToggleBtn.disabled) return;
+  const wantToShare = !(currentPresenter && currentPresenter === currentUsername);
+  sendControl("toggle_presentation", { enabled: wantToShare });
+});
+
+leaveButton.addEventListener("click", beginLeaveCountdown);
+cancelLeaveBtn.addEventListener("click", cancelLeaveCountdown);
+confirmLeaveBtn.addEventListener("click", () => confirmLeave(false));
+
+init();

@@ -20,13 +20,64 @@ body {
   height: 100vh;
 }
 
-header {
+.app-header {
   padding: 1rem 2rem;
   display: flex;
   align-items: center;
   justify-content: space-between;
   background: var(--panel);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.status {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+.control-bar {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.control-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.5rem 0.85rem;
+  border-radius: 999px;
+  transition: background 0.2s ease, border 0.2s ease, transform 0.2s ease;
+}
+
+.control-button .icon {
+  font-size: 1rem;
+}
+
+.control-button.active {
+  background: rgba(76, 139, 245, 0.2);
+  border-color: rgba(76, 139, 245, 0.6);
+  transform: translateY(-1px);
+}
+
+.control-button.danger,
+.join-card .actions .danger {
+  background: rgba(245, 108, 108, 0.2);
+  border-color: rgba(245, 108, 108, 0.45);
+  color: #fca5a5;
+}
+
+.control-button.danger:hover:not(:disabled),
+.join-card .actions .danger:hover {
+  background: rgba(245, 108, 108, 0.35);
+}
+
+.control-button:disabled {
+  opacity: 0.4;
 }
 
 main {
@@ -138,6 +189,78 @@ button {
 button:disabled {
   background: rgba(255, 255, 255, 0.1);
   cursor: not-allowed;
+}
+
+.join-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(8px);
+  background: rgba(8, 10, 18, 0.85);
+  z-index: 10;
+}
+
+.join-overlay.hidden {
+  display: none;
+}
+
+.join-card {
+  background: var(--panel);
+  border-radius: 16px;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.4);
+  padding: 2rem;
+  width: min(420px, 90vw);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.join-card h2 {
+  margin: 0;
+}
+
+.join-card .hint {
+  margin: 0;
+  color: var(--muted);
+}
+
+.join-card input {
+  padding: 0.7rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
+.join-card .actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
+.join-card .actions .secondary {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.join-card .join-status {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.join-card .join-status.error {
+  color: var(--danger);
+}
+
+.leave-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.hidden {
+  display: none;
 }
 
 .sidebar {
