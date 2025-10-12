@@ -119,8 +119,9 @@ class ControlServer:
             logger.exception("Error while handling client %s: %s", peer, exc)
         finally:
             if username:
-                await self._session_manager.unregister(username)
-                await self._session_manager.broadcast(ControlAction.USER_LEFT, {"username": username})
+                removed = await self._session_manager.unregister(username)
+                if removed:
+                    await self._session_manager.broadcast(ControlAction.USER_LEFT, {"username": username})
                 tasks = []
                 if self._video_server:
                     tasks.append(self._video_server.remove_user(username))

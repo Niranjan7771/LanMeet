@@ -44,8 +44,12 @@ async def test_session_manager_snapshot_tracks_events() -> None:
     assert snapshot["clients"][0]["connection_type"] == "tcp"
     assert snapshot["clients"][0]["bytes_received"] >= 2048
     assert snapshot["clients"][0]["bandwidth_bps"] >= 0
+    assert snapshot["participant_count"] == 1
+    assert "alice" in snapshot["participant_usernames"]
 
     await manager.unregister("alice")
     snapshot_after = await manager.snapshot()
     assert snapshot_after["clients"] == []
     assert any(event["type"] == "user_left" for event in snapshot_after["events"])
+    assert snapshot_after["participant_count"] == 0
+    assert snapshot_after["participant_usernames"] == []

@@ -11,6 +11,7 @@ const screenPreviewEl = document.getElementById("screen-preview");
 const videoGridEl = document.getElementById("video-grid");
 const screenSizeSlider = document.getElementById("screen-size");
 const screenSizeValue = document.getElementById("screen-size-value");
+const participantCountDisplay = document.getElementById("participant-count-display");
 
 const joinOverlay = document.getElementById("join-overlay");
 const joinForm = document.getElementById("join-form");
@@ -349,6 +350,7 @@ function initState(payload) {
   videoEnabled = false;
   updateStatusLine();
   participants = new Set(payload.peers || []);
+  ensureSelfInParticipants();
   renderParticipants();
   chatMessagesEl.innerHTML = "";
   (payload.chat_history || []).forEach((msg) => appendChatMessage(msg));
@@ -364,6 +366,7 @@ function initState(payload) {
   ensureVideoTile(currentUsername);
   resetLeaveFlow();
   updateControlButtons();
+  updateParticipantSummary();
 }
 
 function handleStateSnapshot(snapshot) {
@@ -376,6 +379,7 @@ function handleStateSnapshot(snapshot) {
     nameInput.value = currentUsername;
   }
   participants = new Set(snapshot.peers || []);
+  ensureSelfInParticipants();
   renderParticipants();
   chatMessagesEl.innerHTML = "";
   (snapshot.chat_history || []).forEach((msg) => appendChatMessage(msg));
@@ -401,6 +405,7 @@ function handleStateSnapshot(snapshot) {
   updateStatusLine();
   sendControl("file_request_list");
   applyScreenSize(currentScreenHeight);
+  updateParticipantSummary();
 }
 
 function appendChatMessage({ sender, message, timestamp_ms }) {
@@ -419,6 +424,7 @@ function appendChatMessage({ sender, message, timestamp_ms }) {
 
 function renderParticipants() {
   participantListEl.innerHTML = "";
+  ensureSelfInParticipants();
   Array.from(participants)
     .sort((a, b) => a.localeCompare(b))
     .forEach((username) => {
@@ -426,6 +432,7 @@ function renderParticipants() {
       li.textContent = username;
       participantListEl.appendChild(li);
     });
+  updateParticipantSummary();
 }
 
 function ensureVideoTile(username) {
@@ -434,12 +441,19 @@ function ensureVideoTile(username) {
   }
   const tile = document.createElement("div");
   tile.className = "video-tile";
+  tile.dataset.username = username;
   const label = document.createElement("div");
   label.className = "video-label";
   const isSelf = username === currentUsername;
   label.textContent = isSelf ? "You" : username;
   const img = document.createElement("img");
   img.alt = `${username} video`;
+  img.addEventListener("load", () => {
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      tile.style.setProperty("--video-aspect", `${img.naturalWidth} / ${img.naturalHeight}`);
+      tile.classList.add("has-frame");
+    }
+  });
   tile.append(img, label);
   if (isSelf) {
     tile.classList.add("self-video");
@@ -448,6 +462,7 @@ function ensureVideoTile(username) {
     videoGridEl.appendChild(tile);
   }
   videoElements.set(username, img);
+  updatePresenterHighlight();
 }
 
 function removeVideoTile(username) {
@@ -456,6 +471,7 @@ function removeVideoTile(username) {
   videoElements.delete(username);
   const tile = img.parentElement;
   tile?.remove();
+  updateParticipantSummary();
 }
 
 function updateVideoTile(username, frame) {
@@ -592,6 +608,7 @@ function setPresenterState(username) {
     screenPreviewEl.innerHTML = "No presenter";
     applyScreenSize(currentScreenHeight);
   }
+  updatePresenterHighlight();
 }
 
 function resetLeaveFlow() {
@@ -663,6 +680,31 @@ function confirmLeave(autoTriggered = false) {
   setJoinStatus(accepted ? "Disconnecting…" : "Unable to signal disconnect", !accepted);
   updateControlButtons();
   updateStatusLine("Disconnecting…");
+}
+
+function ensureSelfInParticipants() {
+  if (currentUsername) {
+    participants.add(currentUsername);
+  }
+}
+
+function updateParticipantSummary() {
+  ensureSelfInParticipants();
+  if (participantCountDisplay) {
+    const total = participants.size;
+    participantCountDisplay.textContent = total > 0 ? `${total} online` : "No participants";
+  }
+  updatePresenterHighlight();
+}
+
+function updatePresenterHighlight() {
+  const hasPresenter = Boolean(currentPresenter);
+  document.body.classList.toggle("presenter-active", hasPresenter);
+  videoElements.forEach((img, username) => {
+    const tile = img.parentElement;
+    if (!tile) return;
+    tile.classList.toggle("presenter", currentPresenter === username);
+  });
 }
 
 chatForm.addEventListener("submit", (event) => {

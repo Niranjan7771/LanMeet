@@ -23,8 +23,10 @@ async function fetchState() {
 }
 
 function renderState(state) {
-  const clients = state.clients || [];
-  participantCountEl.textContent = clients.length;
+  const clients = Array.isArray(state.clients) ? state.clients : [];
+  const usernames = Array.isArray(state.participant_usernames) ? state.participant_usernames : clients.map((client) => client.username);
+  const participantCount = typeof state.participant_count === "number" ? state.participant_count : new Set(usernames).size;
+  participantCountEl.textContent = participantCount;
   const presenter = state.presenter || "None";
   presenterEl.textContent = presenter;
   chatCountEl.textContent = (state.chat_history || []).length;

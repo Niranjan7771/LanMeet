@@ -57,31 +57,38 @@
           </button>
         </div>
       </header>
-      <main>
-        <section class="video-grid">
-          <h2>Video Feeds</h2>
-          <div class="grid" id="video-grid">
-            <p class="placeholder">Video module coming soon…</p>
+      <main class="meeting-layout">
+        <section class="stage" id="meeting-stage">
+          <div class="presenter-container">
+            <div class="stage-header">
+              <h2>Presenter View</h2>
+              <div class="screen-size-control">
+                <label for="screen-size">Viewer size</label>
+                <input type="range" id="screen-size" min="240" max="720" value="360" />
+                <span id="screen-size-value" class="size-value">360px</span>
+              </div>
+            </div>
+            <div id="screen-preview" class="screen-preview">No presenter</div>
+          </div>
+          <div class="video-collection">
+            <div class="section-header">
+              <h2>Participants</h2>
+              <span class="participant-count" id="participant-count-display"></span>
+            </div>
+            <div class="grid" id="video-grid">
+              <p class="placeholder">Video module coming soon…</p>
+            </div>
           </div>
         </section>
-        <section class="chat-panel">
+        <aside class="chat-panel">
           <h2>Group Chat</h2>
           <div class="messages" id="chat-messages"></div>
           <form id="chat-form">
             <input type="text" id="chat-input" placeholder="Type a message" autocomplete="off" />
             <button type="submit">Send</button>
           </form>
-        </section>
-        <section class="sidebar">
-          <div class="module">
-            <h3>Screen Sharing</h3>
-            <div class="screen-size-control">
-              <label for="screen-size">Viewer size</label>
-              <input type="range" id="screen-size" min="240" max="720" value="360" />
-              <span id="screen-size-value" class="size-value">360px</span>
-            </div>
-            <div id="screen-preview" class="screen-preview">No presenter</div>
-          </div>
+        </aside>
+        <aside class="sidebar">
           <div class="module">
             <h3>File Sharing</h3>
             <input type="file" id="file-input" />
@@ -92,7 +99,7 @@
             <h3>Participants</h3>
             <ul id="participant-list"></ul>
           </div>
-        </section>
+        </aside>
       </main>
     </div>
     <script src="/assets/main.js" type="module"></script>

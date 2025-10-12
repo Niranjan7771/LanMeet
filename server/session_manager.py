@@ -67,23 +67,25 @@ class SessionManager:
             )
             return client
 
-    async def unregister(self, username: str) -> None:
+    async def unregister(self, username: str) -> bool:
         async with self._lock:
             client = self._clients.pop(username, None)
-            if client:
-                if self._presenter == username:
-                    self._presenter = None
-                try:
-                    client.writer.close()
-                except Exception:  # pragma: no cover - cleanup best effort
-                    logger.exception("Error while closing writer for %s", username)
-                logger.info("Unregistered client %s", username)
-                self._record_event(
-                    "user_left",
-                    {
-                        "username": username,
-                    },
-                )
+            if client is None:
+                return False
+            if self._presenter == username:
+                self._presenter = None
+            try:
+                client.writer.close()
+            except Exception:  # pragma: no cover - cleanup best effort
+                logger.exception("Error while closing writer for %s", username)
+            logger.info("Unregistered client %s", username)
+            self._record_event(
+                "user_left",
+                {
+                    "username": username,
+                },
+            )
+            return True
 
     async def grant_presenter(self, username: str) -> bool:
         async with self._lock:
@@ -183,22 +185,25 @@ class SessionManager:
     async def snapshot(self) -> dict:
         async with self._lock:
             now_monotonic = time.monotonic()
-            clients = [
-                {
-                    "username": client.username,
-                    "last_seen_seconds": max(0.0, now_monotonic - client.last_seen),
-                    "connected_at": client.connected_at,
-                    "is_presenter": client.is_presenter,
-                    "connection_type": client.connection_type,
-                    "peer_ip": client.peer_ip,
-                    "peer_port": client.peer_port,
-                    "bytes_sent": client.bytes_sent,
-                    "bytes_received": client.bytes_received,
-                    "throughput_bps": _calculate_rate(client.bytes_received, client.connected_at),
-                    "bandwidth_bps": _calculate_rate(client.bytes_sent, client.connected_at),
-                }
-                for client in self._clients.values()
-            ]
+            clients: list[dict[str, object]] = []
+            usernames: list[str] = []
+            for client in self._clients.values():
+                clients.append(
+                    {
+                        "username": client.username,
+                        "last_seen_seconds": max(0.0, now_monotonic - client.last_seen),
+                        "connected_at": client.connected_at,
+                        "is_presenter": client.is_presenter,
+                        "connection_type": client.connection_type,
+                        "peer_ip": client.peer_ip,
+                        "peer_port": client.peer_port,
+                        "bytes_sent": client.bytes_sent,
+                        "bytes_received": client.bytes_received,
+                        "throughput_bps": _calculate_rate(client.bytes_received, client.connected_at),
+                        "bandwidth_bps": _calculate_rate(client.bytes_sent, client.connected_at),
+                    }
+                )
+                usernames.append(client.username)
             chat_history = [msg.to_dict() for msg in self._chat_history]
             events = list(self._event_log[-300:])
             return {
@@ -206,6 +211,8 @@ class SessionManager:
                 "presenter": self._presenter,
                 "chat_history": chat_history,
                 "events": events,
+                "participant_usernames": usernames,
+                "participant_count": len(usernames),
             }
 
     async def heartbeat_watcher(self) -> None:
