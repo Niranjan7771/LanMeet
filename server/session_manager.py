@@ -236,7 +236,11 @@ class SessionManager:
                     logger.warning("Client %s timed out", username)
                     self._clients.pop(username, None)
             for username in stale:
-                await self.broadcast(ControlAction.USER_LEFT, {"username": username})
+                participants = await self.list_clients()
+                await self.broadcast(
+                    ControlAction.USER_LEFT,
+                    {"username": username, "participants": participants},
+                )
 
     async def mark_heartbeat(self, username: str) -> None:
         async with self._lock:

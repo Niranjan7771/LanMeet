@@ -471,7 +471,6 @@ function removeVideoTile(username) {
   videoElements.delete(username);
   const tile = img.parentElement;
   tile?.remove();
-  updateParticipantSummary();
 }
 
 function updateVideoTile(username, frame) {
@@ -695,6 +694,29 @@ function updateParticipantSummary() {
     participantCountDisplay.textContent = total > 0 ? `${total} online` : "No participants";
   }
   updatePresenterHighlight();
+}
+
+function syncParticipantsFromServer(list) {
+  if (!Array.isArray(list)) {
+    return false;
+  }
+  const filtered = list
+    .filter((name) => typeof name === "string")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  participants = new Set(filtered);
+  renderParticipants();
+  const known = new Set(participants);
+  if (currentUsername) {
+    known.add(currentUsername);
+  }
+  known.forEach((name) => ensureVideoTile(name));
+  videoElements.forEach((_, username) => {
+    if (!known.has(username)) {
+      removeVideoTile(username);
+    }
+  });
+  return true;
 }
 
 function updatePresenterHighlight() {

@@ -79,9 +79,10 @@ class ControlServer:
                     client = await self._session_manager.register(identity.username, writer, peername=peer)
                     username = client.username
                     await self._session_manager.record_received(username, len(data))
+                    participants = await self._session_manager.list_clients()
                     await self._session_manager.broadcast(
                         ControlAction.USER_JOINED,
-                        {"username": username},
+                        {"username": username, "participants": participants},
                         exclude={username},
                     )
                     chat_history = [msg.to_dict() for msg in await self._session_manager.get_chat_history()]
@@ -121,7 +122,11 @@ class ControlServer:
             if username:
                 removed = await self._session_manager.unregister(username)
                 if removed:
-                    await self._session_manager.broadcast(ControlAction.USER_LEFT, {"username": username})
+                    participants = await self._session_manager.list_clients()
+                    await self._session_manager.broadcast(
+                        ControlAction.USER_LEFT,
+                        {"username": username, "participants": participants},
+                    )
                 tasks = []
                 if self._video_server:
                     tasks.append(self._video_server.remove_user(username))
