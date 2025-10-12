@@ -127,6 +127,7 @@ class VideoClient:
                 if not success:
                     continue
                 payload = buffer.tobytes()
+                encoded = base64.b64encode(payload).decode("ascii")
                 header = MediaFrameHeader(
                     stream_id=self._stream_id,
                     sequence_number=self._next_sequence(),
@@ -135,6 +136,7 @@ class VideoClient:
                 ).pack()
                 if self._transport:
                     self._transport.sendto(header + payload, (self._server_host, self._server_port))
+                await self._on_frame(self._username, encoded)
                 await asyncio.sleep(frame_interval)
         finally:
             cap.release()

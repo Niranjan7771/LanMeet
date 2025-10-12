@@ -6,12 +6,12 @@ The LAN Collaboration Suite delivers real-time audio, video, screen sharing, cha
 
 | Capability | What it does |
 | --- | --- |
-| **Video conferencing** | Captures camera frames, compresses them as JPEG, and streams over UDP to all viewers. |
+| **Video conferencing** | Captures camera frames, compresses them as JPEG, streams over UDP, and provides a live self-preview in the browser UI. |
 | **Audio rooms** | Mixes live microphone input from every participant and replays to peers with minimal latency. |
-| **Screen sharing** | Lets one presenter share their desktop via reliable TCP until another takes the role. |
+| **Screen sharing** | Lets one presenter share their desktop via reliable TCP until another takes the role, with an adjustable viewer size for attendees. |
 | **Rich chat** | Maintains per-session chat history, timestamps, and sender metadata. |
 | **File transfers** | Supports multiple simultaneous uploads, resumable chunks, and direct browser downloads. |
-| **Admin dashboard** | Shows connected users, presenter status, chat log, and recent events at a glance. |
+| **Admin dashboard** | Shows connected users, presenter status, chat log, recent events, and live network metrics (connection type, IP, ports, throughput, bandwidth). |
 
 ## Project Structure
 

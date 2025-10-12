@@ -9,6 +9,8 @@ const uploadButton = document.getElementById("upload-file");
 const fileInput = document.getElementById("file-input");
 const screenPreviewEl = document.getElementById("screen-preview");
 const videoGridEl = document.getElementById("video-grid");
+const screenSizeSlider = document.getElementById("screen-size");
+const screenSizeValue = document.getElementById("screen-size-value");
 
 const joinOverlay = document.getElementById("join-overlay");
 const joinForm = document.getElementById("join-form");
@@ -40,12 +42,70 @@ const videoElements = new Map();
 let leaveTimerId = null;
 let leaveDeadlineMs = null;
 const LEAVE_GRACE_PERIOD_MS = 20000;
+const DEFAULT_SCREEN_HEIGHT = 360;
+const SCREEN_SIZE_STORAGE_KEY = "lan_collab_screen_height";
+let storedScreenHeight = null;
+try {
+  storedScreenHeight = Number(localStorage.getItem(SCREEN_SIZE_STORAGE_KEY));
+} catch (err) {
+  storedScreenHeight = null;
+}
+let currentScreenHeight = DEFAULT_SCREEN_HEIGHT;
+if (typeof storedScreenHeight === "number" && !Number.isNaN(storedScreenHeight) && storedScreenHeight >= 200) {
+  currentScreenHeight = storedScreenHeight;
+} else if (screenSizeSlider) {
+  const sliderValue = Number(screenSizeSlider.value);
+  if (!Number.isNaN(sliderValue) && sliderValue >= 200) {
+    currentScreenHeight = sliderValue;
+  }
+}
 
 function init() {
   setConnectedUi(false);
   joinButton.disabled = true;
   fetchConfig();
   connectSocket();
+  applyScreenSize(currentScreenHeight);
+  if (screenSizeSlider) {
+    screenSizeSlider.addEventListener("input", (event) => {
+      const target = event.target;
+      const value = target && typeof target.value !== "undefined" ? target.value : screenSizeSlider.value;
+      applyScreenSize(value);
+    });
+  }
+}
+
+function flashStatus(message, severity = "info", duration = 4000) {
+  if (!message) return;
+  statusEl.textContent = message;
+  statusEl.classList.toggle("error", severity === "error");
+  statusEl.classList.toggle("warning", severity === "warning");
+  if (duration > 0) {
+    setTimeout(() => {
+      statusEl.classList.remove("warning");
+      if (severity !== "error") {
+        statusEl.classList.remove("error");
+      }
+      updateStatusLine();
+    }, duration);
+  }
+}
+
+function applyScreenSize(height) {
+  const size = Math.max(200, Math.min(720, Number(height) || DEFAULT_SCREEN_HEIGHT));
+  currentScreenHeight = size;
+  screenPreviewEl.style.height = `${size}px`;
+  if (screenSizeValue) {
+    screenSizeValue.textContent = `${size}px`;
+  }
+  if (screenSizeSlider && Number(screenSizeSlider.value) !== size) {
+    screenSizeSlider.value = String(size);
+  }
+  try {
+    localStorage.setItem(SCREEN_SIZE_STORAGE_KEY, String(size));
+  } catch (err) {
+    // ignore persistence errors
+  }
 }
 
 async function fetchConfig() {
@@ -259,6 +319,7 @@ function updateStatusLine(fallback) {
   if (!joined || !currentUsername) {
     statusEl.textContent = fallback || (socketReady ? "Offline" : "Connecting…");
     statusEl.classList.toggle("error", !socketReady);
+    statusEl.classList.remove("warning");
     return;
   }
   const pieces = [`Connected as ${currentUsername}`];
@@ -267,6 +328,7 @@ function updateStatusLine(fallback) {
   }
   statusEl.textContent = pieces.join(" • ");
   statusEl.classList.remove("error");
+  statusEl.classList.remove("warning");
 }
 
 function setConnectedUi(enabled) {
@@ -338,6 +400,7 @@ function handleStateSnapshot(snapshot) {
   joinOverlay.classList.add("hidden");
   updateStatusLine();
   sendControl("file_request_list");
+  applyScreenSize(currentScreenHeight);
 }
 
 function appendChatMessage({ sender, message, timestamp_ms }) {
@@ -366,19 +429,25 @@ function renderParticipants() {
 }
 
 function ensureVideoTile(username) {
-  if (!username || videoElements.has(username) || username === currentUsername) {
+  if (!username || videoElements.has(username)) {
     return;
   }
   const tile = document.createElement("div");
   tile.className = "video-tile";
   const label = document.createElement("div");
   label.className = "video-label";
-  label.textContent = username;
+  const isSelf = username === currentUsername;
+  label.textContent = isSelf ? "You" : username;
   const img = document.createElement("img");
   img.alt = `${username} video`;
   tile.append(img, label);
+  if (isSelf) {
+    tile.classList.add("self-video");
+    videoGridEl.prepend(tile);
+  } else {
+    videoGridEl.appendChild(tile);
+  }
   videoElements.set(username, img);
-  videoGridEl.appendChild(tile);
 }
 
 function removeVideoTile(username) {
@@ -390,22 +459,22 @@ function removeVideoTile(username) {
 }
 
 function updateVideoTile(username, frame) {
-  if (username === currentUsername) {
-    return;
-  }
   ensureVideoTile(username);
   const img = videoElements.get(username);
   if (img) {
     img.src = `data:image/jpeg;base64,${frame}`;
+    img.parentElement?.classList.remove("video-muted");
   }
 }
 
 function handleScreenControl({ state, username }) {
   if (state === "start" && username !== currentUsername) {
     screenPreviewEl.textContent = "Receiving presenter feed…";
+    applyScreenSize(currentScreenHeight);
   }
   if (state === "stop" && username !== currentUsername) {
     screenPreviewEl.textContent = "No presenter";
+    applyScreenSize(currentScreenHeight);
   }
 }
 
@@ -418,11 +487,13 @@ function handleScreenFrame({ frame, username }) {
     const img = document.createElement("img");
     img.className = "screen-image";
     img.style.width = "100%";
+    img.style.height = "100%";
     img.style.borderRadius = "8px";
     screenPreviewEl.appendChild(img);
   }
   const img = screenPreviewEl.querySelector("img");
   img.src = `data:image/jpeg;base64,${frame}`;
+  applyScreenSize(currentScreenHeight);
 }
 
 function handleFileOffer(payload) {
@@ -483,15 +554,44 @@ function updateControlButtons() {
   micToggleBtn.querySelector(".label").textContent = micEnabled ? "Mic On" : "Mic Off";
   videoToggleBtn.classList.toggle("active", videoEnabled);
   videoToggleBtn.querySelector(".label").textContent = videoEnabled ? "Camera On" : "Camera Off";
+  const selfTileImg = videoElements.get(currentUsername);
+  if (selfTileImg) {
+    if (!videoEnabled) {
+      selfTileImg.removeAttribute("src");
+      selfTileImg.parentElement?.classList.add("video-muted");
+    } else {
+      selfTileImg.parentElement?.classList.remove("video-muted");
+    }
+  }
   const isPresenter = currentPresenter && currentPresenter === currentUsername;
   presentToggleBtn.classList.toggle("active", Boolean(isPresenter));
   presentToggleBtn.querySelector(".label").textContent = isPresenter ? "Stop Sharing" : "Share Screen";
+  const presenterLocked = currentPresenter && currentPresenter !== currentUsername;
+  presentToggleBtn.classList.toggle("locked", Boolean(presenterLocked));
+  presentToggleBtn.title = presenterLocked
+    ? `${currentPresenter} is currently presenting.`
+    : "Start or stop sharing your screen";
 }
 
 function setPresenterState(username) {
   currentPresenter = username;
   updateStatusLine();
   updateControlButtons();
+  if (username && username !== currentUsername) {
+    flashStatus(`${username} is now presenting.`, "info", 2500);
+    if (!screenPreviewEl.querySelector("img")) {
+      screenPreviewEl.textContent = "Waiting for presenter feed…";
+    }
+  }
+  if (username && username === currentUsername) {
+    if (!screenPreviewEl.querySelector("img")) {
+      screenPreviewEl.textContent = "You are sharing your screen";
+    }
+  }
+  if (!username) {
+    screenPreviewEl.innerHTML = "No presenter";
+    applyScreenSize(currentScreenHeight);
+  }
 }
 
 function resetLeaveFlow() {
@@ -629,6 +729,10 @@ videoToggleBtn.addEventListener("click", () => {
 
 presentToggleBtn.addEventListener("click", () => {
   if (presentToggleBtn.disabled) return;
+  if (currentPresenter && currentPresenter !== currentUsername) {
+    flashStatus(`${currentPresenter} is currently presenting. Please wait.`, "warning");
+    return;
+  }
   const wantToShare = !(currentPresenter && currentPresenter === currentUsername);
   sendControl("toggle_presentation", { enabled: wantToShare });
 });

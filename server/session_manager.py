@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 
 from shared.protocol import ChatMessage, ControlAction, encode_control_message
 
@@ -20,12 +20,18 @@ class ConnectedClient:
     last_seen: float = field(default_factory=lambda: time.monotonic())
     connected_at: float = field(default_factory=lambda: time.time())
     is_presenter: bool = False
+    connection_type: str = "tcp"
+    peer_ip: Optional[str] = None
+    peer_port: Optional[int] = None
+    bytes_sent: int = 0
+    bytes_received: int = 0
 
     def touch(self) -> None:
         self.last_seen = time.monotonic()
 
     def send(self, action: ControlAction, data: Dict[str, object]) -> None:
         payload = encode_control_message(action, data)
+        self.bytes_sent += len(payload)
         self.writer.write(payload)
 
 
@@ -39,11 +45,18 @@ class SessionManager:
         self._chat_history: list[ChatMessage] = []
         self._event_log: list[dict] = []
 
-    async def register(self, username: str, writer: asyncio.StreamWriter) -> ConnectedClient:
+    async def register(self, username: str, writer: asyncio.StreamWriter, peername: Optional[Tuple[str, ...]] = None) -> ConnectedClient:
         async with self._lock:
             if username in self._clients:
                 raise ValueError(f"Username '{username}' already connected")
             client = ConnectedClient(username=username, writer=writer)
+            if peername:
+                client.peer_ip = peername[0]
+                if len(peername) > 1:
+                    try:
+                        client.peer_port = int(peername[1])
+                    except (TypeError, ValueError):
+                        client.peer_port = None
             self._clients[username] = client
             logger.info("Registered client %s", username)
             self._record_event(
@@ -116,6 +129,14 @@ class SessionManager:
         async with self._lock:
             return self._clients.get(username)
 
+    async def record_received(self, username: str, num_bytes: int) -> None:
+        if num_bytes <= 0:
+            return
+        async with self._lock:
+            client = self._clients.get(username)
+            if client:
+                client.bytes_received += num_bytes
+
     async def broadcast(self, action: ControlAction, data: Dict[str, object], *, exclude: Optional[Set[str]] = None) -> None:
         if exclude is None:
             exclude = set()
@@ -168,6 +189,13 @@ class SessionManager:
                     "last_seen_seconds": max(0.0, now_monotonic - client.last_seen),
                     "connected_at": client.connected_at,
                     "is_presenter": client.is_presenter,
+                    "connection_type": client.connection_type,
+                    "peer_ip": client.peer_ip,
+                    "peer_port": client.peer_port,
+                    "bytes_sent": client.bytes_sent,
+                    "bytes_received": client.bytes_received,
+                    "throughput_bps": _calculate_rate(client.bytes_received, client.connected_at),
+                    "bandwidth_bps": _calculate_rate(client.bytes_sent, client.connected_at),
                 }
                 for client in self._clients.values()
             ]
@@ -210,3 +238,8 @@ class SessionManager:
         self._event_log.append(event)
         if len(self._event_log) > 1000:
             self._event_log.pop(0)
+
+
+def _calculate_rate(total_bytes: int, connected_at: float) -> float:
+    elapsed = max(0.001, time.time() - connected_at)
+    return (total_bytes * 8) / elapsed

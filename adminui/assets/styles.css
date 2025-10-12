@@ -99,6 +99,7 @@ main {
 .panel td {
   padding: 12px 14px;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  vertical-align: top;
 }
 
 .panel th {
@@ -155,6 +156,11 @@ main {
 
 .timeline .body {
   font-size: 0.95rem;
+}
+
+.subtext {
+  font-size: 0.75rem;
+  color: rgba(148, 163, 184, 0.7);
 }
 
 .status-online {

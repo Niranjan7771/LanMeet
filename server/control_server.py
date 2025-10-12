@@ -76,8 +76,9 @@ class ControlServer:
                     if action != ControlAction.HELLO:
                         raise ValueError("Expected HELLO as first message")
                     identity = ClientIdentity.from_dict(payload)
-                    client = await self._session_manager.register(identity.username, writer)
+                    client = await self._session_manager.register(identity.username, writer, peername=peer)
                     username = client.username
+                    await self._session_manager.record_received(username, len(data))
                     await self._session_manager.broadcast(
                         ControlAction.USER_JOINED,
                         {"username": username},
@@ -88,18 +89,16 @@ class ControlServer:
                     if self._file_server:
                         file_offers = [offer.to_dict() for offer in await self._file_server.list_files()]
                     presenter = await self._session_manager.get_presenter()
-                    writer.write(
-                        encode_control_message(
-                            ControlAction.WELCOME,
-                            {
-                                "username": username,
-                                "chat_history": chat_history,
-                                "peers": await self._session_manager.list_clients(),
-                                "files": file_offers,
-                                "media": self._media_config,
-                                "presenter": presenter,
-                            },
-                        )
+                    client.send(
+                        ControlAction.WELCOME,
+                        {
+                            "username": username,
+                            "chat_history": chat_history,
+                            "peers": await self._session_manager.list_clients(),
+                            "files": file_offers,
+                            "media": self._media_config,
+                            "presenter": presenter,
+                        },
                     )
                     await writer.drain()
             assert username is not None
@@ -109,6 +108,8 @@ class ControlServer:
                 if not data:
                     break
                 buffer += data
+                if username:
+                    await self._session_manager.record_received(username, len(data))
                 messages, buffer = decode_control_stream(buffer)
                 for message in messages:
                     action = ControlAction(message["action"])

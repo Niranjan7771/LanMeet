@@ -38,6 +38,10 @@ body {
   color: var(--danger);
 }
 
+.status.warning {
+  color: #facc15;
+}
+
 .control-bar {
   display: flex;
   gap: 0.75rem;
@@ -62,6 +66,11 @@ body {
   background: rgba(76, 139, 245, 0.2);
   border-color: rgba(76, 139, 245, 0.6);
   transform: translateY(-1px);
+}
+
+.control-button.locked {
+  border-style: dashed;
+  cursor: not-allowed;
 }
 
 .control-button.danger,
@@ -115,6 +124,17 @@ section {
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 2px solid transparent;
+}
+
+.video-tile.self-video {
+  border-color: rgba(76, 139, 245, 0.6);
+  box-shadow: 0 0 0 2px rgba(76, 139, 245, 0.2);
+}
+
+.video-tile.video-muted {
+  background: rgba(0, 0, 0, 0.6);
+  border-style: dashed;
 }
 
 .video-tile img {
@@ -279,13 +299,38 @@ button:disabled {
 }
 
 .screen-preview {
-  height: 180px;
+  min-height: 200px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--muted);
+  overflow: hidden;
+}
+
+.screen-size-control {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.screen-size-control label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 90px;
+}
+
+.screen-size-control input[type="range"] {
+  flex: 1;
+}
+
+.screen-size-control .size-value {
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 72px;
+  text-align: right;
 }
 
 #file-list {
@@ -326,7 +371,8 @@ button:disabled {
 }
 
 .screen-image {
-  max-height: 240px;
+  width: 100%;
+  height: 100%;
   object-fit: contain;
 }
 

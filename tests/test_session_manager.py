@@ -29,6 +29,7 @@ async def test_session_manager_snapshot_tracks_events() -> None:
     writer = DummyWriter()
 
     await manager.register("alice", writer)  # registers user_joined event
+    await manager.record_received("alice", 2048)
     chat = ChatMessage(sender="alice", message="hello", timestamp_ms=123_000)
     await manager.add_chat_message(chat)
     await manager.grant_presenter("alice")
@@ -40,6 +41,9 @@ async def test_session_manager_snapshot_tracks_events() -> None:
     assert any(event["type"] == "chat_message" for event in snapshot["events"])
     assert snapshot["clients"][0]["username"] == "alice"
     assert snapshot["clients"][0]["is_presenter"] is True
+    assert snapshot["clients"][0]["connection_type"] == "tcp"
+    assert snapshot["clients"][0]["bytes_received"] >= 2048
+    assert snapshot["clients"][0]["bandwidth_bps"] >= 0
 
     await manager.unregister("alice")
     snapshot_after = await manager.snapshot()

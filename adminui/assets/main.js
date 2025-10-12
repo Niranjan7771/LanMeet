@@ -40,7 +40,7 @@ function renderParticipants(clients, presenter) {
   if (!clients.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 4;
+    cell.colSpan = 9;
     cell.className = "placeholder";
     cell.textContent = "No active participants";
     row.appendChild(cell);
@@ -72,7 +72,32 @@ function renderParticipants(clients, presenter) {
       const heartbeatCell = document.createElement("td");
       heartbeatCell.textContent = `${lastHeartbeat} ago`;
 
-      row.append(nameCell, statusCell, connectedCell, heartbeatCell);
+      const connectionCell = document.createElement("td");
+      connectionCell.textContent = (client.connection_type || "-").toUpperCase();
+
+      const addressCell = document.createElement("td");
+      addressCell.textContent = client.peer_ip || "-";
+
+      const portCell = document.createElement("td");
+      portCell.textContent = client.peer_port ?? "-";
+
+      const throughputCell = document.createElement("td");
+      throughputCell.innerHTML = `${formatBitsPerSecond(client.throughput_bps)}<div class="subtext">${formatBytes(client.bytes_received)} received</div>`;
+
+      const bandwidthCell = document.createElement("td");
+      bandwidthCell.innerHTML = `${formatBitsPerSecond(client.bandwidth_bps)}<div class="subtext">${formatBytes(client.bytes_sent)} sent</div>`;
+
+      row.append(
+        nameCell,
+        statusCell,
+        connectedCell,
+        heartbeatCell,
+        connectionCell,
+        addressCell,
+        portCell,
+        throughputCell,
+        bandwidthCell
+      );
       participantTable.appendChild(row);
     });
 }
@@ -159,6 +184,34 @@ function makePlaceholder(text) {
   item.className = "placeholder";
   item.textContent = text;
   return item;
+}
+
+function formatBitsPerSecond(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  const units = ["bps", "Kbps", "Mbps", "Gbps"];
+  let index = 0;
+  let n = value;
+  while (n >= 1000 && index < units.length - 1) {
+    n /= 1000;
+    index += 1;
+  }
+  return `${n.toFixed(n >= 100 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatBytes(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let index = 0;
+  let n = value;
+  while (n >= 1024 && index < units.length - 1) {
+    n /= 1024;
+    index += 1;
+  }
+  return `${n.toFixed(n >= 100 ? 0 : 1)} ${units[index]}`;
 }
 
 fetchState();

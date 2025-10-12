@@ -75,6 +75,11 @@
         <section class="sidebar">
           <div class="module">
             <h3>Screen Sharing</h3>
+            <div class="screen-size-control">
+              <label for="screen-size">Viewer size</label>
+              <input type="range" id="screen-size" min="240" max="720" value="360" />
+              <span id="screen-size-value" class="size-value">360px</span>
+            </div>
             <div id="screen-preview" class="screen-preview">No presenter</div>
           </div>
           <div class="module">
