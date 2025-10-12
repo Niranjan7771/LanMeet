@@ -15,6 +15,7 @@ from .session_manager import SessionManager
 logger = logging.getLogger(__name__)
 
 FRAME_INTERVAL = 0.02  # 20 ms
+MAX_BUFFER_FRAMES = 10  # keep at most 200ms of backlog per user
 
 
 class AudioServer(asyncio.DatagramProtocol):
@@ -87,7 +88,10 @@ class AudioServer(asyncio.DatagramProtocol):
 
     async def _enqueue(self, username: str, samples: np.ndarray) -> None:
         async with self._lock:
-            self._buffers[username].append(samples)
+            buffer = self._buffers[username]
+            buffer.append(samples)
+            while len(buffer) > MAX_BUFFER_FRAMES:
+                buffer.popleft()
 
     async def _mix_loop(self) -> None:
         try:

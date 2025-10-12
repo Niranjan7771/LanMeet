@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Set, Tuple
+from typing import Awaitable, Dict, Optional, Set, Tuple
 
 from shared.protocol import ChatMessage, ControlAction, encode_control_message
 
@@ -142,24 +142,32 @@ class SessionManager:
     async def broadcast(self, action: ControlAction, data: Dict[str, object], *, exclude: Optional[Set[str]] = None) -> None:
         if exclude is None:
             exclude = set()
+        drains: list[Awaitable[None]] = []
         async with self._lock:
             for username, client in self._clients.items():
                 if username in exclude:
                     continue
                 try:
                     client.send(action, data)
+                    drains.append(client.writer.drain())
                 except Exception:
                     logger.exception("Failed to queue message to %s", username)
+        if drains:
+            await asyncio.gather(*drains, return_exceptions=True)
 
     async def send_to(self, username: str, action: ControlAction, data: Dict[str, object]) -> None:
+        drain: Optional[Awaitable[None]] = None
         async with self._lock:
             client = self._clients.get(username)
             if client is None:
                 return
             try:
                 client.send(action, data)
+                drain = client.writer.drain()
             except Exception:
                 logger.exception("Failed to send direct message to %s", username)
+        if drain is not None:
+            await asyncio.gather(drain, return_exceptions=True)
 
     async def add_chat_message(self, chat: ChatMessage) -> None:
         async with self._lock:

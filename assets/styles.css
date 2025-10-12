@@ -95,7 +95,7 @@ body {
   grid-template-columns: minmax(0, 3fr) 320px 280px;
   gap: 1rem;
   padding: 1rem 2rem;
-  align-items: start;
+  align-items: stretch;
 }
 
 .stage {
@@ -198,7 +198,9 @@ body {
 
 .chat-panel .messages {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   background: rgba(0, 0, 0, 0.25);
   border-radius: 8px;
   padding: 0.75rem;
@@ -212,7 +214,8 @@ body {
   width: 320px;
   max-width: 100%;
   min-height: 0;
-  height: 100%;
+  height: calc(100vh - 160px);
+  overflow: hidden;
 }
 
 .chat-message {
@@ -453,5 +456,7 @@ body.presenter-active .screen-preview {
   .chat-panel,
   .sidebar {
     width: 100%;
+    height: auto;
+    overflow: visible;
   }
 }
