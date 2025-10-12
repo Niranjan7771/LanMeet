@@ -132,6 +132,8 @@ class ControlClient:
         try:
             while not self._stop:
                 await asyncio.sleep(3)
-                await self.send(ControlAction.HEARTBEAT, {"timestamp_ms": int(time.time() * 1000)})
+                timestamp_ms = int(time.time() * 1000)
+                logger.debug("Sending heartbeat from %s at %s", self._username, timestamp_ms)
+                await self.send(ControlAction.HEARTBEAT, {"timestamp_ms": timestamp_ms})
         except asyncio.CancelledError:
             pass

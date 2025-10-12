@@ -246,7 +246,9 @@ class SessionManager:
         async with self._lock:
             client = self._clients.get(username)
             if client:
+                elapsed = time.monotonic() - client.last_seen
                 client.touch()
+                logger.debug("Heartbeat received from %s (%.2fs since last)", username, elapsed)
 
     def _record_event(self, event_type: str, details: Dict[str, object]) -> None:
         event = {
