@@ -22,11 +22,6 @@ from .screen_server import ScreenServer
 from .video_server import VideoServer
 from .session_manager import SessionManager
 from .admin_dashboard import AdminServer
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +47,19 @@ async def main() -> None:
         default=Path("adminui"),
         help="Path to admin dashboard static assets",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str.upper,
+        default="INFO",
+        choices=["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"],
+        help="Logging verbosity",
+    )
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level, logging.INFO),
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    )
 
     session_manager = SessionManager()
     file_server = FileServer(args.host, args.file_port, args.storage_dir, session_manager)

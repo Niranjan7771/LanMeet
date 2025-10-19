@@ -27,13 +27,14 @@ The system is a hub-and-spoke client/server application operating exclusively on
 | Group chat             | TCP       | Client ↔ Server  | Length-prefixed JSON messages. |
 | File sharing           | TCP       | Client ↔ Server  | Chunked transfers with resumable tokens. |
 | Control signalling     | TCP       | Client ↔ Server  | Session join/leave, user presence, presenter control. |
+| Heartbeat telemetry    | TCP       | Client → Server  | Clients emit periodic heartbeats; the server records timing to detect stalled control links. |
 | UI bridge              | WebSocket (loopback) | Browser ↔ Client daemon | Bridge between web UI and client runtime for local interactions. |
 
 ## Modules
 
 1. **Session Core (`shared/` + `server/session_manager.py`)**
-   - Manages authenticated users, room membership, and heartbeats.
-   - Maintains routing tables for per-user audio/video sockets.
+   - Manages authenticated users, room membership, and heartbeats, with a watchdog that prunes stale clients.
+   - Maintains routing tables for per-user audio/video sockets and logs heartbeat intervals when debug logging is enabled.
 
 2. **Chat Service**
    - TCP-based, ensures ordered delivery.

@@ -51,10 +51,12 @@ class ControlClient:
             ClientIdentity(username=self._username).to_dict(),
         )
         await self._send_raw(hello)
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         asyncio.create_task(self._send_loop())
         asyncio.create_task(self._recv_loop())
         await self._connected.wait()
+        await self._send_heartbeat()
+        if not self._stop:
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def close(self) -> None:
         self._stop = True
@@ -134,6 +136,11 @@ class ControlClient:
                 await asyncio.sleep(3)
                 timestamp_ms = int(time.time() * 1000)
                 logger.debug("Sending heartbeat from %s at %s", self._username, timestamp_ms)
-                await self.send(ControlAction.HEARTBEAT, {"timestamp_ms": timestamp_ms})
+                await self._send_heartbeat()
         except asyncio.CancelledError:
             pass
+
+    async def _send_heartbeat(self) -> None:
+        timestamp_ms = int(time.time() * 1000)
+        logger.debug("Sending heartbeat from %s at %s", self._username, timestamp_ms)
+        await self.send(ControlAction.HEARTBEAT, {"timestamp_ms": timestamp_ms})

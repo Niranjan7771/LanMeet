@@ -77,15 +77,17 @@ pytest
 ### 4. Start the collaboration server
 
 ```powershell
-python -m server --host 0.0.0.0 --tcp-port 55000 --admin-port 8700
+python -m server --host 0.0.0.0 --tcp-port 55000 --video-port 56000 --audio-port 57000 --screen-port 58000 --file-port 59000 --admin-port 8700
 ```
 
 **Flags explained:**
 
 - `--host 0.0.0.0` — bind to all interfaces so other LAN devices can connect.
 - `--tcp-port 55000` — control-channel TCP port (default `55000`).
+- `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000` — UDP/TCP transports for media services (defaults from `shared.protocol`).
 - `--admin-port 8700` — admin dashboard HTTP port (default `8700`).
 - `--admin-host 0.0.0.0` — add this if the dashboard must be reachable from other machines.
+- `--log-level DEBUG` — optional verbosity control for the server (defaults to `INFO`).
 
 **Example:** Restrict access to the local machine for testing:
 
@@ -93,7 +95,7 @@ python -m server --host 0.0.0.0 --tcp-port 55000 --admin-port 8700
 python -m server --host 127.0.0.1 --admin-host 127.0.0.1
 ```
 
-The console logs each media service listener and prints URLs for the admin dashboard.
+The console logs each media service listener, prints URLs for the admin dashboard, and now records heartbeat diagnostics when run with `--log-level debug`.
 
 ### 5. Launch a client runtime per participant
 
@@ -107,6 +109,7 @@ python -m client 192.168.1.50 --tcp-port 55000 --ui-port 8100 --username "alex"
 - `--tcp-port` — must match the server’s control port.
 - `--ui-port` — HTTP port serving the web UI (default `8100`).
 - `--username` — optional initial display name; can be changed from the UI.
+- `--log-level` — choose `DEBUG` when you need per-heartbeat logs; defaults to `INFO`.
 
 Once started, the client automatically opens the browser at `http://127.0.0.1:8100`. Pick a display name (or randomize), then use the control bar to toggle microphone, camera, and screen sharing. A “Leave” button provides a 20-second undo window before fully disconnecting.
 
@@ -131,6 +134,7 @@ You’ll see live participant counts, current presenter, recent events, and chat
 
 ## Troubleshooting & Tips
 
+- **Heartbeat timeouts:** Run the server with `--log-level debug` and start clients with `--log-level DEBUG` to trace heartbeat send/receive intervals; matching timestamps quickly surface stalled links.
 - **Firewall rules:** Allow inbound UDP/TCP on the configured ports (defaults: TCP `55000`, UDP `56000` series, HTTP `8100` & `8700`).
 - **No video/audio devices:** The video and audio modules degrade gracefully; check logs for hardware warnings.
 - **Rejoining quickly:** Use the Leave button’s cancel countdown if you disconnect accidentally.
