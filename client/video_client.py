@@ -108,18 +108,26 @@ class VideoClient:
         asyncio.create_task(self._on_frame(username, encoded))
 
     async def _capture_loop(self) -> None:
-        cap = cv2.VideoCapture(self._device_index)
-        if not cap.isOpened():
-            return
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
-        cap.set(cv2.CAP_PROP_FPS, self._fps)
+        cap: Optional[cv2.VideoCapture] = None
         try:
             frame_interval = 1 / self._fps
             while not self._stop_event.is_set():
                 if not self._capture_enabled:
+                    if cap is not None:
+                        cap.release()
+                        cap = None
                     await asyncio.sleep(0.2)
                     continue
+                if cap is None:
+                    cap = cv2.VideoCapture(self._device_index)
+                    if not cap.isOpened():
+                        cap.release()
+                        cap = None
+                        await asyncio.sleep(1.0)
+                        continue
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+                    cap.set(cv2.CAP_PROP_FPS, self._fps)
                 frame = await asyncio.to_thread(self._read_frame, cap)
                 if frame is None:
                     continue
@@ -139,7 +147,8 @@ class VideoClient:
                 await self._on_frame(self._username, encoded)
                 await asyncio.sleep(frame_interval)
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
 
     def _read_frame(self, cap: cv2.VideoCapture) -> Optional[np.ndarray]:
         ret, frame = cap.read()

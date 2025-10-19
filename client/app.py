@@ -80,6 +80,7 @@ class ClientApp:
         self._peers: List[str] = []
         self._chat_history: List[Dict[str, object]] = []
         self._file_catalog: Dict[str, Dict[str, object]] = {}
+        self._peer_media: Dict[str, Dict[str, bool]] = {}
         self._presenter: Optional[str] = None
         self._audio_enabled = False
         self._video_enabled = False
@@ -238,6 +239,12 @@ class ClientApp:
         self._audio_enabled = False
         self._video_enabled = False
         self._screen_requested = False
+        self._peer_media = {
+            username: {
+                "audio_enabled": self._audio_enabled,
+                "video_enabled": self._video_enabled,
+            }
+        }
         try:
             await self._client.connect()
             self._connected = True
@@ -268,6 +275,7 @@ class ClientApp:
         self._audio_client = None
         self._screen_publisher = None
         self._screen_requested = False
+        self._peer_media = {}
 
     async def _broadcast_session_status(self, state: str, **payload: object) -> None:
         payload_data = dict(payload)
@@ -297,17 +305,42 @@ class ClientApp:
                 "video_enabled": self._video_enabled,
                 "screen_requested": self._screen_requested,
             },
+            "peer_media": {
+                peer: dict(state) for peer, state in self._peer_media.items()
+            },
         }
 
     def _set_audio_enabled(self, enabled: bool) -> None:
         self._audio_enabled = enabled
         if self._audio_client:
             self._audio_client.set_capture_enabled(enabled)
+        self._update_local_media_state(audio_enabled=enabled)
 
     def _set_video_enabled(self, enabled: bool) -> None:
         self._video_enabled = enabled
         if self._video_client:
             self._video_client.set_capture_enabled(enabled)
+        self._update_local_media_state(video_enabled=enabled)
+
+    def _update_local_media_state(
+        self,
+        *,
+        audio_enabled: Optional[bool] = None,
+        video_enabled: Optional[bool] = None,
+    ) -> None:
+        if self._username is None:
+            return
+        entry = self._peer_media.setdefault(
+            self._username,
+            {
+                "audio_enabled": False,
+                "video_enabled": False,
+            },
+        )
+        if audio_enabled is not None:
+            entry["audio_enabled"] = audio_enabled
+        if video_enabled is not None:
+            entry["video_enabled"] = video_enabled
 
     async def run(self, host: str = "127.0.0.1", port: int = 8100) -> None:
         import uvicorn
@@ -346,9 +379,9 @@ class ClientApp:
             media = payload.get("media") or {}
             await self._ensure_media_clients(media)
             peers = payload.get("peers", [])
-            self._peers = peers
+            self._peers = [peer for peer in peers if isinstance(peer, str)]
             if self._video_client:
-                self._video_client.update_peers(peers)
+                self._video_client.update_peers(self._peers)
             chat_history = payload.get("chat_history") or []
             self._chat_history = [dict(message) for message in chat_history if isinstance(message, dict)]
             files = payload.get("files") or []
@@ -358,20 +391,79 @@ class ClientApp:
                     file_copy = dict(file)
                     self._file_catalog[file_copy["file_id"]] = file_copy
             self._presenter = payload.get("presenter")
+            raw_media_state = payload.get("media_state")
+            media_state = raw_media_state if isinstance(raw_media_state, dict) else {}
+            refreshed_peer_media: dict[str, dict[str, bool]] = {}
+            for peer, state in media_state.items():
+                if isinstance(peer, str) and isinstance(state, dict):
+                    refreshed_peer_media[peer] = {
+                        "audio_enabled": bool(state.get("audio_enabled")),
+                        "video_enabled": bool(state.get("video_enabled")),
+                    }
+            if self._username:
+                refreshed_peer_media.setdefault(
+                    self._username,
+                    {
+                        "audio_enabled": self._audio_enabled,
+                        "video_enabled": self._video_enabled,
+                    },
+                )
+            self._peer_media = refreshed_peer_media
+            for peer in self._peers:
+                if isinstance(peer, str):
+                    self._peer_media.setdefault(
+                        peer,
+                        {
+                            "audio_enabled": False,
+                            "video_enabled": False,
+                        },
+                    )
         elif action == ControlAction.USER_JOINED:
             username = payload.get("username")
-            if username and username not in self._peers:
+            participants = payload.get("participants")
+            if isinstance(participants, list):
+                self._peers = [peer for peer in participants if isinstance(peer, str)]
+            elif username and username not in self._peers:
                 self._peers.append(username)
-                if self._video_client:
-                    self._video_client.update_peers(self._peers)
+            if self._video_client:
+                self._video_client.update_peers(self._peers)
+            if self._username:
+                self._peer_media.setdefault(
+                    self._username,
+                    {
+                        "audio_enabled": self._audio_enabled,
+                        "video_enabled": self._video_enabled,
+                    },
+                )
+            if isinstance(username, str):
+                self._peer_media.setdefault(
+                    username,
+                    {
+                        "audio_enabled": False,
+                        "video_enabled": False,
+                    },
+                )
         elif action == ControlAction.USER_LEFT:
             username = payload.get("username")
-            if username and username in self._peers:
+            participants = payload.get("participants")
+            if isinstance(participants, list):
+                self._peers = [peer for peer in participants if isinstance(peer, str)]
+            elif username and username in self._peers:
                 self._peers = [peer for peer in self._peers if peer != username]
-                if self._video_client:
-                    self._video_client.update_peers(self._peers)
+            if self._video_client:
+                self._video_client.update_peers(self._peers)
             if self._presenter == username:
                 self._presenter = None
+            if self._username:
+                self._peer_media.setdefault(
+                    self._username,
+                    {
+                        "audio_enabled": self._audio_enabled,
+                        "video_enabled": self._video_enabled,
+                    },
+                )
+            if isinstance(username, str):
+                self._peer_media.pop(username, None)
         elif action == ControlAction.CHAT_MESSAGE:
             message = {
                 "sender": payload.get("sender"),
@@ -390,6 +482,22 @@ class ClientApp:
             elif payload.get("file_id"):
                 file_copy = dict(payload)
                 self._file_catalog[file_copy["file_id"]] = file_copy
+        elif action == ControlAction.VIDEO_STATUS:
+            username = payload.get("username")
+            if isinstance(username, str):
+                entry = self._peer_media.setdefault(
+                    username,
+                    {
+                        "audio_enabled": False,
+                        "video_enabled": False,
+                    },
+                )
+                if "audio_enabled" in payload:
+                    entry["audio_enabled"] = bool(payload.get("audio_enabled"))
+                if "video_enabled" in payload:
+                    entry["video_enabled"] = bool(payload.get("video_enabled"))
+                if username == self._username and "video_enabled" in payload:
+                    self._video_enabled = bool(payload.get("video_enabled"))
 
         await self._ws_hub.broadcast(
             {
@@ -450,6 +558,7 @@ class ClientApp:
                 return
             enabled = bool(payload.get("enabled", False))
             self._set_video_enabled(enabled)
+            await self._client.send(ControlAction.VIDEO_STATUS, {"video_enabled": enabled})
         elif kind == "toggle_presentation":
             desired = bool(payload.get("enabled", False))
             if not self._client:

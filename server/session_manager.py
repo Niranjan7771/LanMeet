@@ -10,7 +10,7 @@ from shared.protocol import ChatMessage, ControlAction, encode_control_message
 
 logger = logging.getLogger(__name__)
 
-HEARTBEAT_TIMEOUT = 10.0  # seconds
+HEARTBEAT_TIMEOUT = 30.0  # seconds
 
 
 @dataclass(slots=True)
@@ -25,6 +25,8 @@ class ConnectedClient:
     peer_port: Optional[int] = None
     bytes_sent: int = 0
     bytes_received: int = 0
+    audio_enabled: bool = False
+    video_enabled: bool = False
 
     def touch(self) -> None:
         self.last_seen = time.monotonic()
@@ -86,6 +88,36 @@ class SessionManager:
                 },
             )
             return True
+    async def update_media_state(
+        self,
+        username: str,
+        *,
+        audio_enabled: Optional[bool] = None,
+        video_enabled: Optional[bool] = None,
+    ) -> Optional[dict[str, object]]:
+        async with self._lock:
+            client = self._clients.get(username)
+            if client is None:
+                return None
+            if audio_enabled is not None:
+                client.audio_enabled = audio_enabled
+            if video_enabled is not None:
+                client.video_enabled = video_enabled
+            return {
+                "username": username,
+                "audio_enabled": client.audio_enabled,
+                "video_enabled": client.video_enabled,
+            }
+
+    async def get_media_state_snapshot(self) -> dict[str, dict[str, bool]]:
+        async with self._lock:
+            return {
+                username: {
+                    "audio_enabled": client.audio_enabled,
+                    "video_enabled": client.video_enabled,
+                }
+                for username, client in self._clients.items()
+            }
 
     async def grant_presenter(self, username: str) -> bool:
         async with self._lock:
@@ -209,6 +241,8 @@ class SessionManager:
                         "bytes_received": client.bytes_received,
                         "throughput_bps": _calculate_rate(client.bytes_received, client.connected_at),
                         "bandwidth_bps": _calculate_rate(client.bytes_sent, client.connected_at),
+                        "audio_enabled": client.audio_enabled,
+                        "video_enabled": client.video_enabled,
                     }
                 )
                 usernames.append(client.username)

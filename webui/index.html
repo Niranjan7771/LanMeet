@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
+    <!-- Join Overlay -->
     <div id="join-overlay" class="join-overlay">
       <div class="join-card">
         <div id="join-section">
@@ -32,76 +33,115 @@
         </div>
       </div>
     </div>
-    <div class="app-shell">
+
+    <!-- Main App -->
+    <div class="app-container">
+      <!-- Header -->
       <header class="app-header">
-        <div>
+        <div class="header-left">
           <h1>LAN Collaboration Suite</h1>
-          <div class="status" id="status">Offline</div>
+          <span class="status" id="status">Offline</span>
         </div>
-        <div class="control-bar">
-          <button id="toggle-mic" class="control-button" disabled>
+        <div class="header-right">
+          <button id="toggle-mic" class="control-button" disabled title="Toggle Microphone">
             <span class="icon">🎤</span>
-            <span class="label">Mic Off</span>
+            <span class="label">Mic</span>
           </button>
-          <button id="toggle-video" class="control-button" disabled>
+          <button id="toggle-video" class="control-button" disabled title="Toggle Camera">
             <span class="icon">🎥</span>
-            <span class="label">Camera Off</span>
+            <span class="label">Camera</span>
           </button>
-          <button id="toggle-present" class="control-button" disabled>
+          <button id="toggle-present" class="control-button" disabled title="Share Screen">
             <span class="icon">🖥️</span>
-            <span class="label">Share Screen</span>
+            <span class="label">Present</span>
           </button>
-          <button id="leave-session" class="control-button danger" disabled>
+          <button id="leave-session" class="control-button danger" disabled title="Leave Session">
             <span class="icon">🚪</span>
             <span class="label">Leave</span>
           </button>
         </div>
       </header>
-      <main class="meeting-layout">
-        <section class="stage" id="meeting-stage">
-          <div class="presenter-container">
-            <div class="stage-header">
-              <h2>Presenter View</h2>
-              <div class="screen-size-control">
-                <label for="screen-size">Viewer size</label>
-                <input type="range" id="screen-size" min="240" max="720" value="360" />
-                <span id="screen-size-value" class="size-value">360px</span>
-              </div>
-            </div>
-            <div id="screen-preview" class="screen-preview">No presenter</div>
-          </div>
-          <div class="video-collection">
-            <div class="section-header">
-              <h2>Participants</h2>
-              <span class="participant-count" id="participant-count-display"></span>
-            </div>
-            <div class="grid" id="video-grid">
-              <p class="placeholder">Video module coming soon…</p>
-            </div>
-          </div>
-        </section>
-        <aside class="chat-panel">
-          <h2>Group Chat</h2>
-          <div class="messages" id="chat-messages"></div>
-          <form id="chat-form">
-            <input type="text" id="chat-input" placeholder="Type a message" autocomplete="off" />
-            <button type="submit">Send</button>
-          </form>
-        </aside>
-        <aside class="sidebar">
-          <div class="module">
-            <h3>File Sharing</h3>
-            <input type="file" id="file-input" />
-            <button id="upload-file">Upload</button>
-            <ul id="file-list"></ul>
-          </div>
-          <div class="module">
+
+      <!-- Main Meeting Area -->
+      <div class="meeting-container">
+        <!-- Left Sidebar (Participants) -->
+        <aside class="sidebar sidebar-left hidden" id="participants-sidebar">
+          <div class="sidebar-header">
             <h3>Participants</h3>
-            <ul id="participant-list"></ul>
+            <button class="close-btn" id="close-participants-btn">&times;</button>
+          </div>
+          <ul id="participant-list" class="participant-list"></ul>
+        </aside>
+
+        <!-- Center Stage -->
+  <main class="stage" id="meeting-stage">
+          <!-- Screen Sharing Area -->
+          <div id="screen-wrapper" class="screen-wrapper hidden">
+            <div id="screen-container" class="screen-container">
+              <div id="screen-status" class="screen-status">No presenter</div>
+              <img id="screen-image" class="screen-image" alt="Shared screen" />
+            </div>
+          </div>
+
+          <!-- Video Grid -->
+          <div id="video-grid" class="video-grid">
+            <p class="placeholder">Waiting for participants…</p>
+          </div>
+        </main>
+
+        <!-- Right Sidebar (Chat & Files) -->
+        <aside class="sidebar sidebar-right hidden" id="chat-sidebar">
+          <div class="sidebar-header">
+            <h3>Chat & Files</h3>
+            <button class="close-btn" id="close-chat-btn">&times;</button>
+          </div>
+
+          <!-- Tabs -->
+          <div class="sidebar-tabs">
+            <button class="tab-btn active" data-tab="chat">Chat</button>
+            <button class="tab-btn" data-tab="files">Files</button>
+          </div>
+
+          <!-- Chat Tab -->
+          <div class="tab-content active" id="chat-tab">
+            <div id="chat-messages" class="chat-messages"></div>
+            <form id="chat-form" class="chat-form">
+              <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off" />
+              <button type="submit">Send</button>
+            </form>
+          </div>
+
+          <!-- Files Tab -->
+          <div class="tab-content" id="files-tab">
+            <div class="file-upload">
+              <input type="file" id="file-input" />
+              <button id="upload-file">Upload</button>
+            </div>
+            <ul id="file-list" class="file-list"></ul>
           </div>
         </aside>
-      </main>
+      </div>
+
+      <!-- Bottom Control Bar with Panel Toggles -->
+      <footer class="control-footer">
+        <div class="footer-left">
+          <button id="toggle-participants-btn" class="footer-button" disabled>
+            <span class="icon">👥</span>
+            <span class="label">Participants</span>
+          </button>
+        </div>
+        <div class="footer-center">
+          <span id="participant-count-display" class="participant-count">0 participants</span>
+        </div>
+        <div class="footer-right">
+          <button id="toggle-chat-btn" class="footer-button" disabled>
+            <span class="icon">💬</span>
+            <span class="label">Chat</span>
+          </button>
+        </div>
+      </footer>
     </div>
+
     <script src="/assets/main.js" type="module"></script>
   </body>
 </html>

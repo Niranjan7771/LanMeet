@@ -39,6 +39,7 @@ class ControlAction(str, Enum):
     FILE_CHUNK = "file_chunk"
     FILE_COMPLETE = "file_complete"
     FILE_PROGRESS = "file_progress"
+    VIDEO_STATUS = "video_status"
     ERROR = "error"
 
 

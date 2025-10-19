@@ -90,6 +90,7 @@ class ControlServer:
                     if self._file_server:
                         file_offers = [offer.to_dict() for offer in await self._file_server.list_files()]
                     presenter = await self._session_manager.get_presenter()
+                    media_state = await self._session_manager.get_media_state_snapshot()
                     client.send(
                         ControlAction.WELCOME,
                         {
@@ -99,6 +100,7 @@ class ControlServer:
                             "files": file_offers,
                             "media": self._media_config,
                             "presenter": presenter,
+                            "media_state": media_state,
                         },
                     )
                     await writer.drain()
@@ -181,6 +183,16 @@ class ControlServer:
                     username,
                     ControlAction.FILE_OFFER,
                     {"files": offers},
+                )
+            return
+
+        if action == ControlAction.VIDEO_STATUS:
+            enabled = bool(payload.get("video_enabled", False))
+            state = await self._session_manager.update_media_state(username, video_enabled=enabled)
+            if state:
+                await self._session_manager.broadcast(
+                    ControlAction.VIDEO_STATUS,
+                    state,
                 )
             return
 

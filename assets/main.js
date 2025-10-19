@@ -2,16 +2,35 @@ const statusEl = document.getElementById("status");
 const chatMessagesEl = document.getElementById("chat-messages");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
-const chatSendBtn = chatForm.querySelector("button");
 const participantListEl = document.getElementById("participant-list");
 const fileListEl = document.getElementById("file-list");
 const uploadButton = document.getElementById("upload-file");
 const fileInput = document.getElementById("file-input");
-const screenPreviewEl = document.getElementById("screen-preview");
+const stageEl = document.getElementById("meeting-stage");
+const screenWrapperEl = document.getElementById("screen-wrapper");
+const screenStatusEl = document.getElementById("screen-status");
+const screenImageEl = document.getElementById("screen-image");
 const videoGridEl = document.getElementById("video-grid");
-const screenSizeSlider = document.getElementById("screen-size");
-const screenSizeValue = document.getElementById("screen-size-value");
 const participantCountDisplay = document.getElementById("participant-count-display");
+
+// Sidebar elements
+const participantsSidebar = document.getElementById("participants-sidebar");
+const chatSidebar = document.getElementById("chat-sidebar");
+const toggleParticipantsBtn = document.getElementById("toggle-participants-btn");
+const toggleChatBtn = document.getElementById("toggle-chat-btn");
+const closeParticipantsBtn = document.getElementById("close-participants-btn");
+const closeChatBtn = document.getElementById("close-chat-btn");
+
+// Tab elements
+const tabBtns = document.querySelectorAll(".tab-btn");
+const tabContents = document.querySelectorAll(".tab-content");
+
+const VIDEO_PLACEHOLDER_TEXT = "Waiting for participants...";
+const VIDEO_IDLE_TIMEOUT_MS = 4000;
+const VIDEO_STALE_CHECK_INTERVAL_MS = 1500;
+const SCREEN_IDLE_TIMEOUT_MS = 4500;
+const SCREEN_STALE_CHECK_INTERVAL_MS = 1500;
+const BLANK_SCREEN_DATA_URL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 const joinOverlay = document.getElementById("join-overlay");
 const joinForm = document.getElementById("join-form");
@@ -40,39 +59,131 @@ let joined = false;
 let micEnabled = false;
 let videoEnabled = false;
 const videoElements = new Map();
+const videoLastFrameAt = new Map();
 let leaveTimerId = null;
 let leaveDeadlineMs = null;
 const LEAVE_GRACE_PERIOD_MS = 20000;
-const DEFAULT_SCREEN_HEIGHT = 360;
-const SCREEN_SIZE_STORAGE_KEY = "lan_collab_screen_height";
-let storedScreenHeight = null;
-try {
-  storedScreenHeight = Number(localStorage.getItem(SCREEN_SIZE_STORAGE_KEY));
-} catch (err) {
-  storedScreenHeight = null;
-}
-let currentScreenHeight = DEFAULT_SCREEN_HEIGHT;
-if (typeof storedScreenHeight === "number" && !Number.isNaN(storedScreenHeight) && storedScreenHeight >= 200) {
-  currentScreenHeight = storedScreenHeight;
-} else if (screenSizeSlider) {
-  const sliderValue = Number(screenSizeSlider.value);
-  if (!Number.isNaN(sliderValue) && sliderValue >= 200) {
-    currentScreenHeight = sliderValue;
+
+const avatarStyleCache = new Map();
+const peerMedia = new Map();
+let screenLastFrameAt = null;
+let screenWatchdogTimerId = null;
+
+function getAvatarInitial(username) {
+  if (!username) {
+    return "?";
   }
+  const trimmed = username.trim();
+  if (!trimmed) {
+    return "?";
+  }
+  return trimmed[0].toUpperCase();
 }
+
+function getAvatarGradient(username) {
+  const key = username || "";
+  if (avatarStyleCache.has(key)) {
+    return avatarStyleCache.get(key);
+  }
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash << 5) - hash + key.charCodeAt(i);
+    hash |= 0; // keep in 32-bit range
+  }
+  const hue = Math.abs(hash) % 360;
+  const secondaryHue = (hue + 35) % 360;
+  const gradient = `linear-gradient(135deg, hsl(${hue} 65% 72%), hsl(${secondaryHue} 70% 62%))`;
+  avatarStyleCache.set(key, gradient);
+  return gradient;
+}
+
+function createAvatarElement(username) {
+  const avatar = document.createElement("div");
+  avatar.className = "video-avatar";
+  avatar.textContent = getAvatarInitial(username);
+  avatar.style.background = getAvatarGradient(username);
+  avatar.setAttribute("aria-hidden", "true");
+  return avatar;
+}
+
+let videoWatchdogTimerId = null;
 
 function init() {
   setConnectedUi(false);
   joinButton.disabled = true;
   fetchConfig();
   connectSocket();
-  applyScreenSize(currentScreenHeight);
-  if (screenSizeSlider) {
-    screenSizeSlider.addEventListener("input", (event) => {
-      const target = event.target;
-      const value = target && typeof target.value !== "undefined" ? target.value : screenSizeSlider.value;
-      applyScreenSize(value);
-    });
+  ensureVideoPlaceholder();
+  updateStagePresenterState(false);
+  showScreenMessage("No presenter");
+  startVideoWatchdog();
+  startScreenWatchdog();
+  
+  // Setup sidebar toggle
+  toggleParticipantsBtn.addEventListener("click", toggleParticipantsSidebar);
+  toggleChatBtn.addEventListener("click", toggleChatSidebar);
+  closeParticipantsBtn.addEventListener("click", () => hideSidebar(participantsSidebar));
+  closeChatBtn.addEventListener("click", () => hideSidebar(chatSidebar));
+  
+  // Setup tab switching
+  tabBtns.forEach((btn) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+}
+
+function toggleParticipantsSidebar() {
+  if (participantsSidebar.classList.contains("hidden")) {
+    showSidebar(participantsSidebar);
+    hideSidebar(chatSidebar);
+    toggleParticipantsBtn.classList.add("active");
+    toggleChatBtn.classList.remove("active");
+  } else {
+    hideSidebar(participantsSidebar);
+    toggleParticipantsBtn.classList.remove("active");
+  }
+}
+
+function toggleChatSidebar() {
+  if (chatSidebar.classList.contains("hidden")) {
+    showSidebar(chatSidebar);
+    hideSidebar(participantsSidebar);
+    toggleChatBtn.classList.add("active");
+    toggleParticipantsBtn.classList.remove("active");
+  } else {
+    hideSidebar(chatSidebar);
+    toggleChatBtn.classList.remove("active");
+  }
+}
+
+function showSidebar(sidebar) {
+  sidebar.classList.remove("hidden");
+}
+
+function hideSidebar(sidebar) {
+  sidebar.classList.add("hidden");
+}
+
+function switchTab(tabName) {
+  // Hide all tabs
+  tabContents.forEach((content) => {
+    content.classList.remove("active");
+  });
+  
+  // Remove active from all buttons
+  tabBtns.forEach((btn) => {
+    btn.classList.remove("active");
+  });
+  
+  // Show selected tab
+  const activeTab = document.getElementById(`${tabName}-tab`);
+  if (activeTab) {
+    activeTab.classList.add("active");
+  }
+  
+  // Set active button
+  const activeBtn = document.querySelector(`[data-tab="${tabName}"]`);
+  if (activeBtn) {
+    activeBtn.classList.add("active");
   }
 }
 
@@ -83,59 +194,176 @@ function flashStatus(message, severity = "info", duration = 4000) {
   statusEl.classList.toggle("warning", severity === "warning");
   if (duration > 0) {
     setTimeout(() => {
-      statusEl.classList.remove("warning");
-      if (severity !== "error") {
-        statusEl.classList.remove("error");
-      }
-      updateStatusLine();
+      statusEl.textContent = "";
+      statusEl.classList.remove("error", "warning");
     }, duration);
   }
 }
 
-function applyScreenSize(height) {
-  const size = Math.max(200, Math.min(720, Number(height) || DEFAULT_SCREEN_HEIGHT));
-  currentScreenHeight = size;
-  screenPreviewEl.style.height = `${size}px`;
-  if (screenSizeValue) {
-    screenSizeValue.textContent = `${size}px`;
+function ensureVideoPlaceholder() {
+  if (!videoGridEl) return;
+  const placeholder = videoGridEl.querySelector(".placeholder");
+  const hasTiles = Boolean(videoGridEl.querySelector(".video-tile"));
+  if (hasTiles && placeholder) {
+    placeholder.remove();
+    return;
   }
-  if (screenSizeSlider && Number(screenSizeSlider.value) !== size) {
-    screenSizeSlider.value = String(size);
+  if (!hasTiles && !placeholder) {
+    const el = document.createElement("p");
+    el.className = "placeholder";
+    el.textContent = VIDEO_PLACEHOLDER_TEXT;
+    videoGridEl.appendChild(el);
   }
-  try {
-    localStorage.setItem(SCREEN_SIZE_STORAGE_KEY, String(size));
-  } catch (err) {
-    // ignore persistence errors
+}
+
+function markVideoFrameReceived(username) {
+  videoLastFrameAt.set(username, performance.now());
+  const img = videoElements.get(username);
+  if (!img) {
+    return;
+  }
+  const tile = img.parentElement;
+  if (tile) {
+    tile.classList.add("has-frame");
+    tile.classList.remove("video-muted");
+  }
+}
+
+function markVideoInactive(username) {
+  videoLastFrameAt.delete(username);
+  const img = videoElements.get(username);
+  if (!img) {
+    return;
+  }
+  img.src = "";
+  img.removeAttribute("src");
+  const tile = img.parentElement;
+  if (tile) {
+    tile.classList.add("video-muted");
+    tile.classList.remove("has-frame");
+  }
+}
+
+function applyVideoEnabledState(username, enabled) {
+  if (!username) {
+    return;
+  }
+  ensureVideoTile(username);
+  if (!enabled) {
+    markVideoInactive(username);
+    return;
+  }
+  videoLastFrameAt.delete(username);
+  const img = videoElements.get(username);
+  if (!img) {
+    return;
+  }
+  const tile = img.parentElement;
+  if (tile) {
+    tile.classList.remove("video-muted");
+  }
+}
+
+function updatePeerMedia(username, state) {
+  if (typeof username !== "string" || !username) {
+    return;
+  }
+  const previous = peerMedia.get(username) || { audio_enabled: false, video_enabled: false };
+  const next = { ...previous };
+  if (state && typeof state === "object") {
+    if (Object.prototype.hasOwnProperty.call(state, "audio_enabled")) {
+      next.audio_enabled = Boolean(state.audio_enabled);
+    }
+    if (Object.prototype.hasOwnProperty.call(state, "video_enabled")) {
+      next.video_enabled = Boolean(state.video_enabled);
+      applyVideoEnabledState(username, next.video_enabled);
+    }
+  }
+  peerMedia.set(username, next);
+}
+
+function applyMediaSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return;
+  }
+  Object.entries(snapshot).forEach(([username, state]) => {
+    updatePeerMedia(username, state);
+  });
+}
+
+function startVideoWatchdog() {
+  if (videoWatchdogTimerId !== null) {
+    return;
+  }
+  videoWatchdogTimerId = window.setInterval(() => {
+    const now = performance.now();
+    videoElements.forEach((img, username) => {
+      const lastFrameAt = videoLastFrameAt.get(username);
+      if (lastFrameAt && now - lastFrameAt > VIDEO_IDLE_TIMEOUT_MS) {
+        markVideoInactive(username);
+      }
+    });
+  }, VIDEO_STALE_CHECK_INTERVAL_MS);
+}
+
+function startScreenWatchdog() {
+  if (screenWatchdogTimerId !== null) {
+    return;
+  }
+  screenWatchdogTimerId = window.setInterval(() => {
+    if (!currentPresenter || screenLastFrameAt === null) {
+      return;
+    }
+    const now = performance.now();
+    if (now - screenLastFrameAt > SCREEN_IDLE_TIMEOUT_MS) {
+      screenLastFrameAt = null;
+      setPresenterState(null);
+    }
+  }, SCREEN_STALE_CHECK_INTERVAL_MS);
+}
+
+function updateStagePresenterState(hasPresenter) {
+  if (stageEl) {
+    stageEl.classList.toggle("has-presenter", hasPresenter);
+  }
+  if (screenWrapperEl) {
+    if (hasPresenter) {
+      screenWrapperEl.classList.remove("hidden");
+    } else {
+      screenWrapperEl.classList.add("hidden");
+    }
+  }
+}
+
+function showScreenMessage(message) {
+  clearScreenFrame();
+  if (screenStatusEl) {
+    screenStatusEl.textContent = message;
   }
 }
 
 async function fetchConfig() {
   try {
-    const response = await fetch("/api/config", { cache: "no-store" });
-    if (!response.ok) throw new Error("config fetch failed");
-    const data = await response.json();
-    if (data.prefill_username) {
-      nameInput.value = data.prefill_username;
-    } else {
-      await requestRandomName();
+    const res = await fetch("/api/config");
+    const config = await res.json();
+    if (config && config.server_host && config.tcp_port) {
+      nameInput.value = generateLocalName();
+      joinButton.disabled = false;
     }
   } catch (error) {
-    console.warn("Unable to load client config", error);
-    await requestRandomName();
+    console.error("Config fetch error", error);
   }
 }
 
 async function requestRandomName() {
   try {
-    const response = await fetch("/api/random-name", { cache: "no-store" });
-    if (!response.ok) throw new Error("random name failed");
-    const data = await response.json();
-    if (data.username) {
-      nameInput.value = data.username;
-      return;
+    const res = await fetch("/api/random-name");
+    const data = await res.json();
+    if (data.name) {
+      nameInput.value = data.name;
     }
   } catch (error) {
-    console.warn("Random name generation failed", error);
+    console.error("Random name error", error);
   }
   nameInput.value = generateLocalName();
 }
@@ -154,32 +382,27 @@ function connectSocket() {
   socket = new WebSocket(`ws://${window.location.host}/ws/control`);
   socket.addEventListener("open", () => {
     socketReady = true;
-    joinButton.disabled = false;
-    if (!joined) {
-      setJoinStatus("Ready to join", false);
-      joinOverlay.classList.remove("hidden");
-    }
-    updateStatusLine();
+    flashStatus("Connected to server", "info", 2000);
   });
   socket.addEventListener("close", () => {
     socketReady = false;
-    joined = false;
-    joinButton.disabled = true;
-    setConnectedUi(false);
-    setJoinStatus("Reconnecting to client service…", true);
-    joinOverlay.classList.remove("hidden");
-    updateStatusLine("Disconnected. Attempting to reconnect…");
-    setTimeout(connectSocket, 2000);
+    if (!joined) {
+      flashStatus("Disconnected from server", "warning", 3000);
+    }
   });
   socket.addEventListener("message", (event) => {
-    const data = JSON.parse(event.data);
-    handleServerEvent(data.type, data.payload);
+    try {
+      const msg = JSON.parse(event.data);
+      handleServerEvent(msg.type, msg.payload || {});
+    } catch (err) {
+      console.error("Message parse error", err);
+    }
   });
 }
 
 function sendControl(type, payload = {}) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
-    console.warn("Socket not ready for", type);
+    console.warn("Socket not ready");
     return false;
   }
   socket.send(
@@ -194,32 +417,43 @@ function sendControl(type, payload = {}) {
 function handleServerEvent(type, payload) {
   switch (type) {
     case "session_status":
-      handleSessionStatus(payload || {});
+      handleSessionStatus(payload);
+      break;
+    case "state_snapshot":
+      handleStateSnapshot(payload);
       break;
     case "welcome":
-      initState(payload);
+      handleWelcome(payload);
+      break;
+    case "presenter_granted":
+      handlePresenterGranted(payload);
+      break;
+    case "presenter_revoked":
+      handlePresenterRevoked(payload);
+      break;
+    case "user_joined":
+      handleUserJoined(payload);
+      break;
+    case "user_left":
+      handleUserLeft(payload);
+      break;
+    case "peer_joined":
+      syncParticipantsFromServer(payload.peers || []);
+      break;
+    case "peer_left":
+      syncParticipantsFromServer(payload.peers || []);
+      break;
+    case "presenter_changed":
+      setPresenterState(payload.presenter || null);
       break;
     case "chat_message":
       appendChatMessage(payload);
       break;
-    case "user_joined":
-      participants.add(payload.username);
-      renderParticipants();
-      ensureVideoTile(payload.username);
+    case "video_frame":
+      updateVideoTile(payload.username, payload.frame);
       break;
-    case "user_left":
-      participants.delete(payload.username);
-      renderParticipants();
-      removeVideoTile(payload.username);
-      break;
-    case "presenter_granted":
-      setPresenterState(payload.username);
-      break;
-    case "presenter_revoked":
-      if (currentPresenter === payload.username) {
-        setPresenterState(null);
-        screenPreviewEl.innerHTML = "Presenter stopped";
-      }
+    case "video_status":
+      handleVideoStatus(payload);
       break;
     case "screen_control":
       handleScreenControl(payload);
@@ -233,81 +467,33 @@ function handleServerEvent(type, payload) {
     case "file_progress":
       handleFileProgress(payload);
       break;
-    case "file_upload_complete":
-      statusEl.textContent = `Upload complete: ${payload.filename}`;
-      break;
-    case "file_download_ready":
-      if (payload?.url) {
-        window.open(payload.url, "_blank");
-      }
-      break;
-    case "video_frame":
-      updateVideoTile(payload.username, payload.frame);
-      break;
-    case "state_snapshot":
-      handleStateSnapshot(payload);
-      break;
     default:
-      console.debug("Unhandled event", type, payload);
+      console.log("Unknown event type", type);
   }
 }
 
 function handleSessionStatus({ state, username, message }) {
   switch (state) {
-    case "idle":
-      resetLeaveFlow();
-      joined = false;
-      micEnabled = false;
-      videoEnabled = false;
-      setConnectedUi(false);
+    case "connected":
+      joined = true;
+      currentUsername = username;
       updateStatusLine();
-      joinButton.disabled = !socketReady;
-      setJoinStatus(socketReady ? "Ready to join" : "Waiting for client service…", !socketReady);
-      joinOverlay.classList.remove("hidden");
-      if (username) {
-        currentUsername = username;
-        nameInput.value = username;
-      }
-      updateControlButtons();
+      setConnectedUi(true);
+      joinOverlay.classList.add("hidden");
       break;
     case "connecting":
-      resetLeaveFlow();
-      joinButton.disabled = true;
-      setJoinStatus(`Connecting as ${username}…`, false);
-      joinOverlay.classList.remove("hidden");
-      break;
-    case "connected":
-      resetLeaveFlow();
-      joined = true;
-      currentUsername = username || currentUsername;
-      joinButton.disabled = false;
-      joinOverlay.classList.add("hidden");
-      setConnectedUi(true);
-      setJoinStatus("Connected", false);
-      updateStatusLine();
-      updateControlButtons();
-      break;
-    case "disconnecting":
-      setConnectedUi(false);
-      joinButton.disabled = true;
-      joinOverlay.classList.remove("hidden");
-      setJoinStatus(`Disconnecting as ${username || currentUsername || ""}…`, false);
-      updateControlButtons();
+      setJoinStatus(`Connecting as ${username}...`, false);
       break;
     case "error":
-      resetLeaveFlow();
       joined = false;
-      micEnabled = false;
-      videoEnabled = false;
-      setConnectedUi(false);
-      joinOverlay.classList.remove("hidden");
-      joinButton.disabled = false;
-      setJoinStatus(message ? `Error: ${message}` : "Unable to connect", true);
-      updateStatusLine("Error establishing session");
-      updateControlButtons();
+      setJoinStatus(message || "Connection error", true);
+      break;
+    case "idle":
+      joined = false;
+      setJoinStatus("Idle", false);
       break;
     default:
-      break;
+      console.log("Unknown session state", state);
   }
 }
 
@@ -318,9 +504,8 @@ function setJoinStatus(text, isError) {
 
 function updateStatusLine(fallback) {
   if (!joined || !currentUsername) {
-    statusEl.textContent = fallback || (socketReady ? "Offline" : "Connecting…");
-    statusEl.classList.toggle("error", !socketReady);
-    statusEl.classList.remove("warning");
+    statusEl.textContent = fallback || "Offline";
+    statusEl.classList.add("error");
     return;
   }
   const pieces = [`Connected as ${currentUsername}`];
@@ -334,13 +519,14 @@ function updateStatusLine(fallback) {
 
 function setConnectedUi(enabled) {
   chatInput.disabled = !enabled;
-  chatSendBtn.disabled = !enabled;
   uploadButton.disabled = !enabled;
   fileInput.disabled = !enabled;
   micToggleBtn.disabled = !enabled;
   videoToggleBtn.disabled = !enabled;
   presentToggleBtn.disabled = !enabled;
   leaveButton.disabled = !enabled;
+  toggleParticipantsBtn.disabled = !enabled;
+  toggleChatBtn.disabled = !enabled;
 }
 
 function initState(payload) {
@@ -351,6 +537,8 @@ function initState(payload) {
   updateStatusLine();
   participants = new Set(payload.peers || []);
   ensureSelfInParticipants();
+  peerMedia.clear();
+  setPresenterState(payload.presenter || null);
   renderParticipants();
   chatMessagesEl.innerHTML = "";
   (payload.chat_history || []).forEach((msg) => appendChatMessage(msg));
@@ -362,8 +550,10 @@ function initState(payload) {
   sendControl("file_request_list");
   videoElements.clear();
   videoGridEl.innerHTML = "";
+  ensureVideoPlaceholder();
   participants.forEach((name) => ensureVideoTile(name));
   ensureVideoTile(currentUsername);
+  applyMediaSnapshot(payload.media_state || payload.peer_media);
   resetLeaveFlow();
   updateControlButtons();
   updateParticipantSummary();
@@ -371,12 +561,13 @@ function initState(payload) {
 
 function handleStateSnapshot(snapshot) {
   if (!snapshot || !snapshot.connected) {
+    initState(snapshot || {});
     return;
   }
   joined = true;
   currentUsername = snapshot.username || currentUsername;
   if (currentUsername) {
-    nameInput.value = currentUsername;
+    ensureSelfInParticipants();
   }
   participants = new Set(snapshot.peers || []);
   ensureSelfInParticipants();
@@ -385,9 +576,7 @@ function handleStateSnapshot(snapshot) {
   (snapshot.chat_history || []).forEach((msg) => appendChatMessage(msg));
   files = new Map();
   (snapshot.files || []).forEach((file) => {
-    if (file.file_id) {
-      files.set(file.file_id, file);
-    }
+    files.set(file.file_id, file);
   });
   renderFiles();
   const media = snapshot.media || {};
@@ -397,14 +586,16 @@ function handleStateSnapshot(snapshot) {
   updateControlButtons();
   videoElements.clear();
   videoGridEl.innerHTML = "";
+  ensureVideoPlaceholder();
   participants.forEach((name) => ensureVideoTile(name));
   ensureVideoTile(currentUsername);
+  peerMedia.clear();
+  applyMediaSnapshot(snapshot.peer_media || snapshot.media_state);
   setConnectedUi(true);
   leaveButton.disabled = false;
   joinOverlay.classList.add("hidden");
   updateStatusLine();
   sendControl("file_request_list");
-  applyScreenSize(currentScreenHeight);
   updateParticipantSummary();
 }
 
@@ -429,7 +620,7 @@ function renderParticipants() {
     .sort((a, b) => a.localeCompare(b))
     .forEach((username) => {
       const li = document.createElement("li");
-      li.textContent = username;
+      li.textContent = username === currentUsername ? `${username} (You)` : username;
       participantListEl.appendChild(li);
     });
   updateParticipantSummary();
@@ -449,20 +640,20 @@ function ensureVideoTile(username) {
   const img = document.createElement("img");
   img.alt = `${username} video`;
   img.addEventListener("load", () => {
-    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-      tile.style.setProperty("--video-aspect", `${img.naturalWidth} / ${img.naturalHeight}`);
-      tile.classList.add("has-frame");
-    }
+    markVideoFrameReceived(username);
   });
-  tile.append(img, label);
+  const avatar = createAvatarElement(username);
+  tile.append(avatar, img, label);
   if (isSelf) {
     tile.classList.add("self-video");
-    videoGridEl.prepend(tile);
   } else {
-    videoGridEl.appendChild(tile);
+    tile.classList.remove("self-video");
   }
   videoElements.set(username, img);
+  videoGridEl.appendChild(tile);
   updatePresenterHighlight();
+  ensureVideoPlaceholder();
+  markVideoInactive(username);
 }
 
 function removeVideoTile(username) {
@@ -471,6 +662,8 @@ function removeVideoTile(username) {
   videoElements.delete(username);
   const tile = img.parentElement;
   tile?.remove();
+  ensureVideoPlaceholder();
+  videoLastFrameAt.delete(username);
 }
 
 function updateVideoTile(username, frame) {
@@ -478,42 +671,64 @@ function updateVideoTile(username, frame) {
   const img = videoElements.get(username);
   if (img) {
     img.src = `data:image/jpeg;base64,${frame}`;
-    img.parentElement?.classList.remove("video-muted");
+    markVideoFrameReceived(username);
   }
 }
 
 function handleScreenControl({ state, username }) {
-  if (state === "start" && username !== currentUsername) {
-    screenPreviewEl.textContent = "Receiving presenter feed…";
-    applyScreenSize(currentScreenHeight);
+  if (state === "start") {
+    currentPresenter = username;
+    screenLastFrameAt = null;
+    updateStatusLine();
+    updateControlButtons();
+    updateStagePresenterState(true);
+    showScreenMessage(`${username} is sharing their screen`);
+    updatePresenterHighlight();
   }
-  if (state === "stop" && username !== currentUsername) {
-    screenPreviewEl.textContent = "No presenter";
-    applyScreenSize(currentScreenHeight);
+  if (state === "stop") {
+    if (currentPresenter === username) {
+      currentPresenter = null;
+      screenLastFrameAt = null;
+      updateStatusLine();
+      updateControlButtons();
+      updateStagePresenterState(false);
+      showScreenMessage("Screen sharing stopped");
+      updatePresenterHighlight();
+    }
   }
 }
 
 function handleScreenFrame({ frame, username }) {
-  if (username === currentUsername || !frame) {
+  if (!frame) {
     return;
   }
-  if (!screenPreviewEl.querySelector("img")) {
-    screenPreviewEl.innerHTML = "";
-    const img = document.createElement("img");
-    img.className = "screen-image";
-    img.style.width = "100%";
-    img.style.height = "100%";
-    img.style.borderRadius = "8px";
-    screenPreviewEl.appendChild(img);
+  updateStagePresenterState(true);
+  if (username === currentUsername) {
+    return;
   }
-  const img = screenPreviewEl.querySelector("img");
-  img.src = `data:image/jpeg;base64,${frame}`;
-  applyScreenSize(currentScreenHeight);
+  if (!screenImageEl) {
+    return;
+  }
+  screenImageEl.removeAttribute("style");
+  screenImageEl.src = `data:image/jpeg;base64,${frame}`;
+  screenImageEl.alt = `${username} shared screen`;
+  screenWrapperEl?.classList.add("has-content");
+  screenLastFrameAt = performance.now();
+}
+
+function clearScreenFrame() {
+  screenLastFrameAt = null;
+  if (screenImageEl) {
+    screenImageEl.src = BLANK_SCREEN_DATA_URL;
+    screenImageEl.removeAttribute("src");
+    screenImageEl.removeAttribute("alt");
+  }
+  screenWrapperEl?.classList.remove("has-content");
 }
 
 function handleFileOffer(payload) {
   if (payload.files) {
-    payload.files.forEach((file) => files.set(file.file_id, file));
+    files = new Map(payload.files.map((f) => [f.file_id, f]));
   } else if (payload.file_id) {
     files.set(payload.file_id, payload);
   }
@@ -522,7 +737,6 @@ function handleFileOffer(payload) {
 
 function handleFileProgress(payload) {
   if (!payload.file_id) {
-    statusEl.textContent = `Uploading ${payload.filename} (${formatBytes(payload.received)} / ${formatBytes(payload.total_size)})`;
     return;
   }
   const file = files.get(payload.file_id) || payload;
@@ -537,17 +751,19 @@ function renderFiles() {
   files.forEach((file, id) => {
     const li = document.createElement("li");
     li.className = "file-entry";
-    const meta = document.createElement("div");
-    meta.className = "file-meta";
-    const progress = file.received && file.total_size ? ` (${Math.floor((file.received / file.total_size) * 100)}%)` : "";
-    meta.textContent = `${file.filename} • ${formatBytes(file.total_size || 0)}${progress}`;
+    const info = document.createElement("div");
+    info.textContent = `${file.filename} (${formatBytes(file.total_size)})`;
+    if (file.received && file.total_size) {
+      const progress = Math.round((file.received / file.total_size) * 100);
+      info.textContent += ` - ${progress}%`;
+    }
     const actions = document.createElement("div");
     actions.className = "file-actions";
     const downloadBtn = document.createElement("button");
-    downloadBtn.textContent = "Download";
-    downloadBtn.addEventListener("click", () => sendControl("file_download", { file_id: id }));
+    downloadBtn.textContent = "⬇️";
+    downloadBtn.onclick = () => downloadFile(id);
     actions.appendChild(downloadBtn);
-    li.append(meta, actions);
+    li.append(info, actions);
     fileListEl.appendChild(li);
   });
 }
@@ -564,23 +780,25 @@ function formatBytes(size) {
   return `${value.toFixed(1)} ${units[idx]}`;
 }
 
+function downloadFile(fileId) {
+  window.location.href = `/api/files/download/${fileId}`;
+}
+
 function updateControlButtons() {
   micToggleBtn.classList.toggle("active", micEnabled);
-  micToggleBtn.querySelector(".label").textContent = micEnabled ? "Mic On" : "Mic Off";
   videoToggleBtn.classList.toggle("active", videoEnabled);
-  videoToggleBtn.querySelector(".label").textContent = videoEnabled ? "Camera On" : "Camera Off";
   const selfTileImg = videoElements.get(currentUsername);
   if (selfTileImg) {
-    if (!videoEnabled) {
-      selfTileImg.removeAttribute("src");
-      selfTileImg.parentElement?.classList.add("video-muted");
-    } else {
-      selfTileImg.parentElement?.classList.remove("video-muted");
+    const tile = selfTileImg.parentElement;
+    if (tile) {
+      tile.classList.toggle("video-muted", !videoEnabled);
+      if (!videoEnabled) {
+        markVideoInactive(currentUsername);
+      }
     }
   }
   const isPresenter = currentPresenter && currentPresenter === currentUsername;
   presentToggleBtn.classList.toggle("active", Boolean(isPresenter));
-  presentToggleBtn.querySelector(".label").textContent = isPresenter ? "Stop Sharing" : "Share Screen";
   const presenterLocked = currentPresenter && currentPresenter !== currentUsername;
   presentToggleBtn.classList.toggle("locked", Boolean(presenterLocked));
   presentToggleBtn.title = presenterLocked
@@ -590,22 +808,19 @@ function updateControlButtons() {
 
 function setPresenterState(username) {
   currentPresenter = username;
+  if (!username) {
+    screenLastFrameAt = null;
+  }
   updateStatusLine();
   updateControlButtons();
+  const hasPresenter = Boolean(username);
+  updateStagePresenterState(hasPresenter);
   if (username && username !== currentUsername) {
-    flashStatus(`${username} is now presenting.`, "info", 2500);
-    if (!screenPreviewEl.querySelector("img")) {
-      screenPreviewEl.textContent = "Waiting for presenter feed…";
-    }
-  }
-  if (username && username === currentUsername) {
-    if (!screenPreviewEl.querySelector("img")) {
-      screenPreviewEl.textContent = "You are sharing your screen";
-    }
-  }
-  if (!username) {
-    screenPreviewEl.innerHTML = "No presenter";
-    applyScreenSize(currentScreenHeight);
+    showScreenMessage(`${username} is presenting`);
+  } else if (hasPresenter) {
+    showScreenMessage("You are presenting");
+  } else {
+    showScreenMessage("No presenter");
   }
   updatePresenterHighlight();
 }
@@ -676,9 +891,9 @@ function confirmLeave(autoTriggered = false) {
   videoEnabled = false;
   setConnectedUi(false);
   const accepted = sendControl("leave_session", { force: true, auto: autoTriggered });
-  setJoinStatus(accepted ? "Disconnecting…" : "Unable to signal disconnect", !accepted);
+  setJoinStatus(accepted ? "Disconnecting..." : "Unable to signal disconnect", !accepted);
   updateControlButtons();
-  updateStatusLine("Disconnecting…");
+  updateStatusLine("Disconnecting...");
 }
 
 function ensureSelfInParticipants() {
@@ -690,10 +905,11 @@ function ensureSelfInParticipants() {
 function updateParticipantSummary() {
   ensureSelfInParticipants();
   if (participantCountDisplay) {
-    const total = participants.size;
-    participantCountDisplay.textContent = total > 0 ? `${total} online` : "No participants";
+    const count = participants.size;
+    participantCountDisplay.textContent = `${count} ${count === 1 ? "participant" : "participants"}`;
   }
   updatePresenterHighlight();
+  ensureVideoPlaceholder();
 }
 
 function syncParticipantsFromServer(list) {
@@ -705,6 +921,11 @@ function syncParticipantsFromServer(list) {
     .map((name) => name.trim())
     .filter((name) => name.length > 0);
   participants = new Set(filtered);
+  Array.from(peerMedia.keys()).forEach((username) => {
+    if (username !== currentUsername && !participants.has(username)) {
+      peerMedia.delete(username);
+    }
+  });
   renderParticipants();
   const known = new Set(participants);
   if (currentUsername) {
@@ -719,16 +940,66 @@ function syncParticipantsFromServer(list) {
   return true;
 }
 
+function handleWelcome(payload) {
+  initState(payload || {});
+}
+
+function handleUserJoined(payload) {
+  const updated = syncParticipantsFromServer(payload.participants || []);
+  if (!updated) {
+    const username = typeof payload.username === "string" ? payload.username : null;
+    if (username) {
+      participants.add(username);
+      renderParticipants();
+      ensureVideoTile(username);
+    }
+  }
+  const username = typeof payload.username === "string" ? payload.username : null;
+  if (username) {
+    updatePeerMedia(username, payload);
+  }
+}
+
+function handleUserLeft(payload) {
+  syncParticipantsFromServer(payload.participants || []);
+  const username = typeof payload.username === "string" ? payload.username : null;
+  if (username) {
+    peerMedia.delete(username);
+  }
+}
+
+function handleVideoStatus(payload) {
+  const username = typeof payload.username === "string" ? payload.username : null;
+  if (!username) {
+    return;
+  }
+  updatePeerMedia(username, payload);
+}
+
+function handlePresenterGranted(payload) {
+  const username = typeof payload.username === "string" ? payload.username : null;
+  setPresenterState(username);
+}
+
+function handlePresenterRevoked(payload) {
+  const username = typeof payload.username === "string" ? payload.username : null;
+  if (!username || currentPresenter === username) {
+    setPresenterState(null);
+  }
+}
+
 function updatePresenterHighlight() {
   const hasPresenter = Boolean(currentPresenter);
   document.body.classList.toggle("presenter-active", hasPresenter);
   videoElements.forEach((img, username) => {
     const tile = img.parentElement;
-    if (!tile) return;
-    tile.classList.toggle("presenter", currentPresenter === username);
+    if (tile) {
+      tile.classList.toggle("presenter", username === currentPresenter);
+    }
   });
 }
 
+// Event Listeners
 chatForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!joined) return;
@@ -743,33 +1014,31 @@ uploadButton.addEventListener("click", async () => {
   const data = new FormData();
   data.append("file", fileInput.files[0]);
   try {
-    await fetch("/api/files/upload", {
-      method: "POST",
-      body: data,
-    });
+    const res = await fetch("/api/files/upload", { method: "POST", body: data });
+    if (res.ok) {
+      fileInput.value = "";
+    }
   } catch (err) {
-    console.error("Upload failed", err);
+    console.error("Upload error", err);
   }
 });
 
 joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!socketReady) {
-    setJoinStatus("Waiting for client service…", true);
+    setJoinStatus("Socket not ready, please try again", true);
     return;
   }
   const desiredName = nameInput.value.trim();
   if (!desiredName) {
     setJoinStatus("Please enter a name", true);
-    nameInput.focus();
     return;
   }
   joinButton.disabled = true;
-  setJoinStatus(`Connecting as ${desiredName}…`, false);
+  setJoinStatus(`Connecting as ${desiredName}...`, false);
   const accepted = sendControl("join", { username: desiredName });
   if (!accepted) {
-    joinButton.disabled = false;
-    setJoinStatus("Connection lost. Retrying…", true);
+    setJoinStatus("Failed to send join request", true);
   }
 });
 
@@ -788,13 +1057,17 @@ videoToggleBtn.addEventListener("click", () => {
   if (videoToggleBtn.disabled) return;
   videoEnabled = !videoEnabled;
   updateControlButtons();
+  if (currentUsername) {
+    applyVideoEnabledState(currentUsername, videoEnabled);
+    updatePeerMedia(currentUsername, { video_enabled: videoEnabled });
+  }
   sendControl("toggle_video", { enabled: videoEnabled });
 });
 
 presentToggleBtn.addEventListener("click", () => {
   if (presentToggleBtn.disabled) return;
   if (currentPresenter && currentPresenter !== currentUsername) {
-    flashStatus(`${currentPresenter} is currently presenting. Please wait.`, "warning");
+    flashStatus(`${currentPresenter} is presenting`, "warning", 2000);
     return;
   }
   const wantToShare = !(currentPresenter && currentPresenter === currentUsername);
