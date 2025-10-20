@@ -498,6 +498,20 @@ class ClientApp:
                     entry["video_enabled"] = bool(payload.get("video_enabled"))
                 if username == self._username and "video_enabled" in payload:
                     self._video_enabled = bool(payload.get("video_enabled"))
+        elif action == ControlAction.AUDIO_STATUS:
+            username = payload.get("username")
+            if isinstance(username, str):
+                entry = self._peer_media.setdefault(
+                    username,
+                    {
+                        "audio_enabled": False,
+                        "video_enabled": False,
+                    },
+                )
+                if "audio_enabled" in payload:
+                    entry["audio_enabled"] = bool(payload.get("audio_enabled"))
+                if username == self._username and "audio_enabled" in payload:
+                    self._audio_enabled = bool(payload.get("audio_enabled"))
 
         await self._ws_hub.broadcast(
             {
@@ -553,6 +567,7 @@ class ClientApp:
                 return
             enabled = bool(payload.get("enabled", False))
             self._set_audio_enabled(enabled)
+            await self._client.send(ControlAction.AUDIO_STATUS, {"audio_enabled": enabled})
         elif kind == "toggle_video":
             if not self._client:
                 return

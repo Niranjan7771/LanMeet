@@ -75,6 +75,7 @@ class AudioClient:
             dtype="float32",
             blocksize=FRAME_SAMPLES,
             callback=self._capture_callback,
+            start=False,
         )
         self._play_stream = sd.OutputStream(
             samplerate=SAMPLE_RATE,
@@ -83,7 +84,6 @@ class AudioClient:
             blocksize=FRAME_SAMPLES,
             callback=self._playback_callback,
         )
-        self._capture_stream.start()
         self._play_stream.start()
 
     def _capture_callback(self, indata, frames, time_info, status) -> None:  # pragma: no cover - audio callback
@@ -164,3 +164,15 @@ class AudioClient:
     def set_capture_enabled(self, enabled: bool) -> None:
         """Enable or disable microphone capture without stopping playback."""
         self._capture_enabled = enabled
+        stream = self._capture_stream
+        if stream is None:
+            return
+        try:
+            if enabled:
+                if not stream.active:
+                    stream.start()
+            else:
+                if stream.active:
+                    stream.stop()
+        except Exception:
+            logger.exception("Failed to toggle microphone capture state")

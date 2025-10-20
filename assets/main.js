@@ -455,6 +455,9 @@ function handleServerEvent(type, payload) {
     case "video_status":
       handleVideoStatus(payload);
       break;
+    case "audio_status":
+      handleAudioStatus(payload);
+      break;
     case "screen_control":
       handleScreenControl(payload);
       break;
@@ -976,6 +979,14 @@ function handleVideoStatus(payload) {
   updatePeerMedia(username, payload);
 }
 
+function handleAudioStatus(payload) {
+  const username = typeof payload.username === "string" ? payload.username : null;
+  if (!username) {
+    return;
+  }
+  updatePeerMedia(username, payload);
+}
+
 function handlePresenterGranted(payload) {
   const username = typeof payload.username === "string" ? payload.username : null;
   setPresenterState(username);
@@ -1050,6 +1061,9 @@ micToggleBtn.addEventListener("click", () => {
   if (micToggleBtn.disabled) return;
   micEnabled = !micEnabled;
   updateControlButtons();
+  if (currentUsername) {
+    updatePeerMedia(currentUsername, { audio_enabled: micEnabled });
+  }
   sendControl("toggle_audio", { enabled: micEnabled });
 });
 

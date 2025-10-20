@@ -40,6 +40,7 @@ class ControlAction(str, Enum):
     FILE_COMPLETE = "file_complete"
     FILE_PROGRESS = "file_progress"
     VIDEO_STATUS = "video_status"
+    AUDIO_STATUS = "audio_status"
     ERROR = "error"
 
 

@@ -196,5 +196,15 @@ class ControlServer:
                 )
             return
 
+        if action == ControlAction.AUDIO_STATUS:
+            enabled = bool(payload.get("audio_enabled", False))
+            state = await self._session_manager.update_media_state(username, audio_enabled=enabled)
+            if state:
+                await self._session_manager.broadcast(
+                    ControlAction.AUDIO_STATUS,
+                    state,
+                )
+            return
+
         # TODO: handle screen, file control messages.
         logger.debug("Unhandled control action %s from %s", action, username)
