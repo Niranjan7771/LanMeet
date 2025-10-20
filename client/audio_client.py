@@ -69,14 +69,7 @@ class AudioClient:
             self._transport = None
 
     def _start_streams(self) -> None:
-        self._capture_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="float32",
-            blocksize=FRAME_SAMPLES,
-            callback=self._capture_callback,
-            start=False,
-        )
+        self._capture_stream = None
         self._play_stream = sd.OutputStream(
             samplerate=SAMPLE_RATE,
             channels=CHANNELS,
@@ -164,15 +157,50 @@ class AudioClient:
     def set_capture_enabled(self, enabled: bool) -> None:
         """Enable or disable microphone capture without stopping playback."""
         self._capture_enabled = enabled
-        stream = self._capture_stream
-        if stream is None:
+        if not self._running.is_set():
             return
-        try:
-            if enabled:
-                if not stream.active:
+
+        if enabled:
+            stream = self._capture_stream
+            if stream is None:
+                try:
+                    stream = sd.InputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                        dtype="float32",
+                        blocksize=FRAME_SAMPLES,
+                        callback=self._capture_callback,
+                    )
                     stream.start()
+                    self._capture_stream = stream
+                except Exception:
+                    logger.exception("Failed to start microphone capture")
+                    self._capture_stream = None
+                    self._capture_enabled = False
             else:
+                if not stream.active:
+                    try:
+                        stream.start()
+                    except Exception:
+                        logger.exception("Failed to resume microphone capture")
+                        self._capture_enabled = False
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                        self._capture_stream = None
+        else:
+            stream = self._capture_stream
+            if stream is None:
+                return
+            try:
                 if stream.active:
                     stream.stop()
-        except Exception:
-            logger.exception("Failed to toggle microphone capture state")
+            except Exception:
+                logger.exception("Failed to stop microphone capture")
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+                self._capture_stream = None

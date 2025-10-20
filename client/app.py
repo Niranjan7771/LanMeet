@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import webbrowser
 from pathlib import Path
@@ -28,6 +29,8 @@ from .video_client import VideoClient
 from .audio_client import AudioClient
 
 logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB limit
 
 
 class WebSocketHub:
@@ -152,6 +155,12 @@ class ClientApp:
             if self._file_client is None:
                 raise HTTPException(status_code=412, detail="Not connected to collaboration session")
 
+            size_bytes = await self._determine_upload_size(file)
+            if size_bytes > MAX_UPLOAD_SIZE_BYTES:
+                max_mb = MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+                raise HTTPException(status_code=413, detail=f"File exceeds {max_mb} MB limit")
+            setattr(file, "size", size_bytes)
+
             async def report_progress(sent: int, total: int) -> None:
                 await self._ws_hub.broadcast(
                     {
@@ -194,6 +203,26 @@ class ClientApp:
                 "Content-Disposition": f"attachment; filename=\"{metadata['filename']}\""
             }
             return StreamingResponse(iterator(), media_type="application/octet-stream", headers=headers)
+
+    async def _determine_upload_size(self, upload: UploadFile) -> int:
+        """Return the size in bytes of an incoming UploadFile without consuming it."""
+        try:
+            upload.file.seek(0, os.SEEK_END)
+            size = int(upload.file.tell())
+            upload.file.seek(0)
+            return size
+        except (AttributeError, OSError, ValueError):
+            size = 0
+            chunk_size = 1024 * 1024
+            while True:
+                chunk = await upload.read(chunk_size)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_SIZE_BYTES:
+                    break
+            await upload.seek(0)
+            return size
 
     def _generate_username(self) -> str:
         adjectives = [

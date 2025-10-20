@@ -1028,9 +1028,21 @@ uploadButton.addEventListener("click", async () => {
     const res = await fetch("/api/files/upload", { method: "POST", body: data });
     if (res.ok) {
       fileInput.value = "";
+      return;
     }
+    let message = "Upload failed";
+    try {
+      const error = await res.json();
+      if (error?.detail) {
+        message = error.detail;
+      }
+    } catch (parseErr) {
+      console.error("Upload error detail parse failed", parseErr);
+    }
+    flashStatus(message, "error", 5000);
   } catch (err) {
     console.error("Upload error", err);
+    flashStatus("Upload error", "error", 5000);
   }
 });
 
