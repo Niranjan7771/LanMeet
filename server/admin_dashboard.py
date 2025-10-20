@@ -4,9 +4,9 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -18,11 +18,20 @@ logger = logging.getLogger(__name__)
 class AdminDashboard:
     """FastAPI application exposing admin insights for the collaboration server."""
 
-    def __init__(self, session_manager: SessionManager, *, static_root: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        session_manager: SessionManager,
+        *,
+        static_root: Optional[Path] = None,
+        shutdown_handler: Optional[Callable[[], Awaitable[None]]] = None,
+        kick_handler: Optional[Callable[[str], Awaitable[bool]]] = None,
+    ) -> None:
         self._session_manager = session_manager
         self._app = FastAPI()
         self._static_root = static_root or Path(__file__).resolve().parent.parent / "adminui"
         assets_dir = self._static_root / "assets"
+        self._shutdown_handler = shutdown_handler
+        self._kick_handler = kick_handler
         if assets_dir.exists():
             self._app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
         else:
@@ -41,6 +50,34 @@ class AdminDashboard:
             snapshot["timestamp"] = time.time()
             return snapshot
 
+        @self._app.post("/api/actions/kick")
+        async def kick(payload: dict = Body(...)) -> dict:
+            username = str(payload.get("username", "")).strip()
+            if not username:
+                raise HTTPException(status_code=400, detail="username required")
+
+            if self._kick_handler is not None:
+                removed = await self._kick_handler(username)
+            else:
+                removed = await self._session_manager.unregister(
+                    username,
+                    event_type="user_kicked",
+                    details={"actor": "admin"},
+                )
+            if not removed:
+                raise HTTPException(status_code=404, detail=f"{username} is not connected")
+
+            logger.info("Admin removed client %s", username)
+            return {"status": "ok"}
+
+        @self._app.post("/api/actions/shutdown")
+        async def shutdown() -> dict:
+            if self._shutdown_handler is None:
+                raise HTTPException(status_code=503, detail="shutdown handler not configured")
+            await self._shutdown_handler()
+            logger.info("Admin requested server shutdown")
+            return {"status": "ok"}
+
     @property
     def app(self) -> FastAPI:
         return self._app
@@ -49,8 +86,22 @@ class AdminDashboard:
 class AdminServer:
     """Background task helper for running the admin FastAPI server."""
 
-    def __init__(self, session_manager: SessionManager, *, host: str, port: int, static_root: Optional[Path] = None) -> None:
-        self._dashboard = AdminDashboard(session_manager, static_root=static_root)
+    def __init__(
+        self,
+        session_manager: SessionManager,
+        *,
+        host: str,
+        port: int,
+        static_root: Optional[Path] = None,
+        shutdown_handler: Optional[Callable[[], Awaitable[None]]] = None,
+        kick_handler: Optional[Callable[[str], Awaitable[bool]]] = None,
+    ) -> None:
+        self._dashboard = AdminDashboard(
+            session_manager,
+            static_root=static_root,
+            shutdown_handler=shutdown_handler,
+            kick_handler=kick_handler,
+        )
         self._host = host
         self._port = port
         self._server: Optional[object] = None

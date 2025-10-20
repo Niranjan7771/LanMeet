@@ -46,11 +46,14 @@ class SessionManager:
         self._presenter: Optional[str] = None
         self._chat_history: list[ChatMessage] = []
         self._event_log: list[dict] = []
+        self._banned_usernames: Set[str] = set()
 
     async def register(self, username: str, writer: asyncio.StreamWriter, peername: Optional[Tuple[str, ...]] = None) -> ConnectedClient:
         async with self._lock:
             if username in self._clients:
                 raise ValueError(f"Username '{username}' already connected")
+            if username in self._banned_usernames:
+                raise PermissionError(f"Username '{username}' is not allowed to join")
             client = ConnectedClient(username=username, writer=writer)
             if peername:
                 client.peer_ip = peername[0]
@@ -69,7 +72,13 @@ class SessionManager:
             )
             return client
 
-    async def unregister(self, username: str) -> bool:
+    async def unregister(
+        self,
+        username: str,
+        *,
+        event_type: str = "user_left",
+        details: Optional[Dict[str, object]] = None,
+    ) -> bool:
         async with self._lock:
             client = self._clients.pop(username, None)
             if client is None:
@@ -81,12 +90,10 @@ class SessionManager:
             except Exception:  # pragma: no cover - cleanup best effort
                 logger.exception("Error while closing writer for %s", username)
             logger.info("Unregistered client %s", username)
-            self._record_event(
-                "user_left",
-                {
-                    "username": username,
-                },
-            )
+            event_details: Dict[str, object] = {"username": username}
+            if details:
+                event_details.update(details)
+            self._record_event(event_type, event_details)
             return True
     async def update_media_state(
         self,
@@ -255,6 +262,7 @@ class SessionManager:
                 "events": events,
                 "participant_usernames": usernames,
                 "participant_count": len(usernames),
+                "banned_usernames": sorted(self._banned_usernames),
             }
 
     async def heartbeat_watcher(self) -> None:
@@ -283,6 +291,31 @@ class SessionManager:
                 elapsed = time.monotonic() - client.last_seen
                 client.touch()
                 logger.debug("Heartbeat received from %s (%.2fs since last)", username, elapsed)
+
+    async def ban_user(self, username: str) -> None:
+        async with self._lock:
+            self._banned_usernames.add(username)
+
+    async def unban_user(self, username: str) -> None:
+        async with self._lock:
+            self._banned_usernames.discard(username)
+
+    async def is_banned(self, username: str) -> bool:
+        async with self._lock:
+            return username in self._banned_usernames
+
+    async def list_banned(self) -> list[str]:
+        async with self._lock:
+            return list(self._banned_usernames)
+
+    async def record_blocked_attempt(self, username: str) -> None:
+        async with self._lock:
+            self._record_event(
+                "user_blocked",
+                {
+                    "username": username,
+                },
+            )
 
     def _record_event(self, event_type: str, details: Dict[str, object]) -> None:
         event = {

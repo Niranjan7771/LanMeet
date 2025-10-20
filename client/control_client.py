@@ -54,6 +54,8 @@ class ControlClient:
         asyncio.create_task(self._send_loop())
         asyncio.create_task(self._recv_loop())
         await self._connected.wait()
+        if self._stop:
+            raise ConnectionError("Connection closed before handshake completed")
         await self._send_heartbeat()
         if not self._stop:
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -120,6 +122,8 @@ class ControlClient:
                         self._connected.set()
                     asyncio.create_task(self._dispatch(action, payload))
         finally:
+            if not self._connected.is_set():
+                self._connected.set()
             await self.close()
 
     async def _dispatch(self, action: ControlAction, payload: dict) -> None:

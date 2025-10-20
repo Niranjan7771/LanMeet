@@ -42,6 +42,7 @@ class ControlAction(str, Enum):
     VIDEO_STATUS = "video_status"
     AUDIO_STATUS = "audio_status"
     ERROR = "error"
+    KICKED = "kicked"
 
 
 @dataclass(slots=True)

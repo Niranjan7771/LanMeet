@@ -37,6 +37,21 @@
 
       <section class="panel">
         <header>
+          <h2>Administrative Controls</h2>
+        </header>
+        <div class="action-row">
+          <button id="action-shutdown" class="action-button danger" type="button">Stop server &amp; clear files</button>
+          <span class="action-hint">Triggers a graceful shutdown and purges temporary storage.</span>
+        </div>
+        <div class="banned-panel">
+          <h3>Removed participants</h3>
+          <p class="action-hint" id="banned-empty">No removed participants.</p>
+          <ul class="pill-list" id="banned-list"></ul>
+        </div>
+      </section>
+
+      <section class="panel">
+        <header>
           <h2>Participants</h2>
         </header>
         <table>
@@ -51,10 +66,11 @@
               <th>Port</th>
               <th>Throughput</th>
               <th>Bandwidth</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="participant-table">
-            <tr><td colspan="9" class="placeholder">No active participants</td></tr>
+            <tr><td colspan="10" class="placeholder">No active participants</td></tr>
           </tbody>
         </table>
       </section>

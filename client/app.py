@@ -88,6 +88,8 @@ class ClientApp:
         self._audio_enabled = False
         self._video_enabled = False
         self._screen_requested = False
+        self._kicked = False
+        self._kick_reason = None
         self._connected = False
         self._app = FastAPI()
         self._configure_routes()
@@ -128,8 +130,11 @@ class ClientApp:
                     {
                         "type": "session_status",
                         "payload": {
-                            "state": "connected" if self._connected else "idle",
+                            "state": "connected"
+                            if self._connected
+                            else ("kicked" if self._kicked else "idle"),
                             "username": self._username,
+                            "message": self._kick_reason,
                         },
                     }
                 )
@@ -262,6 +267,13 @@ class ClientApp:
         return f"{random.choice(adjectives)}-{random.choice(nouns)}-{random.randint(100, 999)}"
 
     async def _start_session(self, username: str) -> None:
+        if self._kicked:
+            await self._broadcast_session_status(
+                "kicked",
+                username=username,
+                message=self._kick_reason or "An administrator removed you from this meeting.",
+            )
+            return
         await self._broadcast_session_status("connecting", username=username)
         await self._stop_media_clients()
         if self._client:
@@ -295,6 +307,15 @@ class ClientApp:
             self._connected = True
             await self._broadcast_session_status("connected", username=username)
         except Exception as exc:
+            if self._kicked:
+                await self._stop_media_clients()
+                if self._client:
+                    await self._client.close()
+                self._client = None
+                self._file_client = None
+                self._screen_publisher = None
+                self._connected = False
+                return
             await self._broadcast_session_status("error", message=str(exc))
             await self._stop_media_clients()
             if self._client:
@@ -557,6 +578,23 @@ class ClientApp:
                     entry["audio_enabled"] = bool(payload.get("audio_enabled"))
                 if username == self._username and "audio_enabled" in payload:
                     self._audio_enabled = bool(payload.get("audio_enabled"))
+        elif action == ControlAction.KICKED:
+            reason = str(payload.get("reason") or "An administrator removed you from this meeting.")
+            self._kicked = True
+            self._kick_reason = reason
+            self._connected = False
+            await self._stop_media_clients()
+            if self._client:
+                await self._client.close()
+            self._client = None
+            self._file_client = None
+            self._screen_publisher = None
+            self._peers = []
+            self._chat_history.clear()
+            self._file_catalog.clear()
+            self._peer_media.clear()
+            self._presenter = None
+            await self._broadcast_session_status("kicked", message=reason)
 
         await self._ws_hub.broadcast(
             {
@@ -571,6 +609,12 @@ class ClientApp:
         kind = data.get("type")
         payload = data.get("payload", {})
         if kind == "join":
+            if self._kicked:
+                await self._broadcast_session_status(
+                    "kicked",
+                    message=self._kick_reason or "An administrator removed you from this meeting.",
+                )
+                return
             username = str(payload.get("username") or self._generate_username())
             try:
                 await self._start_session(username)

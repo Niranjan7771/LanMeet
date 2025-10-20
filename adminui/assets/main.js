@@ -5,6 +5,10 @@ const chatCountEl = document.getElementById("chat-count");
 const chatLogEl = document.getElementById("chat-log");
 const eventLogEl = document.getElementById("event-log");
 const lastUpdatedEl = document.getElementById("last-updated");
+const shutdownButton = document.getElementById("action-shutdown");
+const shutdownLabel = shutdownButton ? shutdownButton.textContent : "";
+const bannedListEl = document.getElementById("banned-list");
+const bannedEmptyEl = document.getElementById("banned-empty");
 
 async function fetchState() {
   try {
@@ -35,6 +39,7 @@ function renderState(state) {
   renderParticipants(clients, presenter);
   renderChat(state.chat_history || []);
   renderEvents(state.events || []);
+  renderBannedList(state.banned_usernames || []);
 }
 
 function renderParticipants(clients, presenter) {
@@ -42,7 +47,7 @@ function renderParticipants(clients, presenter) {
   if (!clients.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 9;
+    cell.colSpan = 10;
     cell.className = "placeholder";
     cell.textContent = "No active participants";
     row.appendChild(cell);
@@ -89,6 +94,14 @@ function renderParticipants(clients, presenter) {
       const bandwidthCell = document.createElement("td");
       bandwidthCell.innerHTML = `${formatBitsPerSecond(client.bandwidth_bps)}<div class="subtext">${formatBytes(client.bytes_sent)} sent</div>`;
 
+      const actionsCell = document.createElement("td");
+      const kickButton = document.createElement("button");
+      kickButton.type = "button";
+      kickButton.className = "action-button";
+      kickButton.textContent = "Kick";
+      kickButton.addEventListener("click", () => handleKick(client.username, kickButton));
+      actionsCell.appendChild(kickButton);
+
       row.append(
         nameCell,
         statusCell,
@@ -98,7 +111,8 @@ function renderParticipants(clients, presenter) {
         addressCell,
         portCell,
         throughputCell,
-        bandwidthCell
+        bandwidthCell,
+        actionsCell
       );
       participantTable.appendChild(row);
     });
@@ -157,9 +171,36 @@ function describeEvent(event) {
       return `${details.username} stopped presenting.`;
     case "chat_message":
       return `${details.sender}: ${details.message}`;
+    case "user_kicked": {
+      const actor = details.actor ? ` by ${details.actor}` : "";
+      return `${details.username} was removed${actor}.`;
+    }
+    case "user_blocked":
+      return `${details.username} attempted to join but is blocked.`;
     default:
       return JSON.stringify(details);
   }
+}
+
+function renderBannedList(usernames) {
+  if (!bannedListEl || !bannedEmptyEl) {
+    return;
+  }
+  bannedListEl.innerHTML = "";
+  const unique = Array.isArray(usernames) ? [...new Set(usernames.filter((name) => typeof name === "string" && name.trim()))] : [];
+  if (!unique.length) {
+    bannedEmptyEl.style.display = "block";
+    return;
+  }
+  bannedEmptyEl.style.display = "none";
+  unique
+    .slice()
+    .sort((a, b) => a.localeCompare(b))
+    .forEach((name) => {
+      const item = document.createElement("li");
+      item.textContent = name;
+      bannedListEl.appendChild(item);
+    });
 }
 
 function formatTimestamp(value) {
@@ -217,3 +258,85 @@ function formatBytes(value) {
 }
 
 fetchState();
+
+if (shutdownButton) {
+  shutdownButton.addEventListener("click", handleShutdown);
+}
+
+async function handleShutdown() {
+  if (!shutdownButton) {
+    return;
+  }
+  const confirmed = window.confirm("Stop the server and clear temporary files?");
+  if (!confirmed) {
+    return;
+  }
+  shutdownButton.disabled = true;
+  shutdownButton.textContent = "Requesting shutdown...";
+  try {
+    await postJson("/api/actions/shutdown");
+    shutdownButton.textContent = "Shutdown requested";
+    lastUpdatedEl.textContent = "Shutdown requested";
+  } catch (error) {
+    console.error("Failed to request shutdown", error);
+    window.alert(error.message || "Failed to request shutdown");
+    shutdownButton.disabled = false;
+    shutdownButton.textContent = shutdownLabel;
+  }
+}
+
+async function handleKick(username, button) {
+  const confirmed = window.confirm(`Remove ${username} from the session?`);
+  if (!confirmed) {
+    return;
+  }
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "Removing...";
+  try {
+    await postJson("/api/actions/kick", { username });
+    button.textContent = "Removed";
+  } catch (error) {
+    console.error("Failed to kick participant", error);
+    window.alert(error.message || "Failed to kick participant");
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function postJson(url, body) {
+  const options = {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    let message = `Request failed: ${response.status}`;
+    try {
+      const data = await response.json();
+      if (data && typeof data.detail === "string") {
+        message = data.detail;
+      }
+    } catch (parseError) {
+      try {
+        const rawText = await response.text();
+        if (rawText) {
+          message = rawText;
+        }
+      } catch {
+        // swallow
+      }
+    }
+    throw new Error(message);
+  }
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}

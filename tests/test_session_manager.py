@@ -13,6 +13,9 @@ class DummyWriter:
     def write(self, data: bytes) -> None:  # pragma: no cover - not needed for test assertions
         pass
 
+    async def drain(self) -> None:  # pragma: no cover - compatibility shim
+        await asyncio.sleep(0)
+
     def close(self) -> None:
         self.closed = True
 
@@ -46,6 +49,7 @@ async def test_session_manager_snapshot_tracks_events() -> None:
     assert snapshot["clients"][0]["bandwidth_bps"] >= 0
     assert snapshot["participant_count"] == 1
     assert "alice" in snapshot["participant_usernames"]
+    assert snapshot["banned_usernames"] == []
 
     await manager.unregister("alice")
     snapshot_after = await manager.snapshot()
@@ -53,3 +57,31 @@ async def test_session_manager_snapshot_tracks_events() -> None:
     assert any(event["type"] == "user_left" for event in snapshot_after["events"])
     assert snapshot_after["participant_count"] == 0
     assert snapshot_after["participant_usernames"] == []
+    assert snapshot_after["banned_usernames"] == []
+
+
+@pytest.mark.anyio
+async def test_unregister_records_custom_event() -> None:
+    manager = SessionManager()
+    writer = DummyWriter()
+
+    await manager.register("bob", writer)
+    await manager.unregister("bob", event_type="user_kicked", details={"actor": "admin"})
+
+    snapshot = await manager.snapshot()
+    assert any(event["type"] == "user_kicked" for event in snapshot["events"])
+
+
+@pytest.mark.anyio
+async def test_ban_user_prevents_registration() -> None:
+    manager = SessionManager()
+    writer = DummyWriter()
+
+    await manager.register("carol", writer)
+    await manager.unregister("carol")
+    await manager.ban_user("carol")
+
+    assert await manager.is_banned("carol") is True
+
+    with pytest.raises(PermissionError):
+        await manager.register("carol", DummyWriter())

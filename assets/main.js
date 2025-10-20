@@ -48,6 +48,8 @@ const leaveSection = document.getElementById("leave-confirm");
 const joinSection = document.getElementById("join-section");
 const cancelLeaveBtn = document.getElementById("cancel-leave");
 const confirmLeaveBtn = document.getElementById("confirm-leave");
+const kickedNotice = document.getElementById("kicked-notice");
+const kickedMessageEl = document.getElementById("kicked-message");
 
 let socket;
 let socketReady = false;
@@ -63,6 +65,8 @@ const videoLastFrameAt = new Map();
 let leaveTimerId = null;
 let leaveDeadlineMs = null;
 const LEAVE_GRACE_PERIOD_MS = 20000;
+let wasKicked = false;
+let kickedReason = "";
 
 const avatarStyleCache = new Map();
 const peerMedia = new Map();
@@ -110,7 +114,7 @@ let videoWatchdogTimerId = null;
 
 function init() {
   setConnectedUi(false);
-  joinButton.disabled = true;
+  setJoinFormEnabled(false);
   fetchConfig();
   connectSocket();
   ensureVideoPlaceholder();
@@ -348,7 +352,7 @@ async function fetchConfig() {
     const config = await res.json();
     if (config && config.server_host && config.tcp_port) {
       nameInput.value = generateLocalName();
-      joinButton.disabled = false;
+      setJoinFormEnabled(true);
     }
   } catch (error) {
     console.error("Config fetch error", error);
@@ -356,6 +360,9 @@ async function fetchConfig() {
 }
 
 async function requestRandomName() {
+  if (wasKicked) {
+    return;
+  }
   try {
     const res = await fetch("/api/random-name");
     const data = await res.json();
@@ -386,7 +393,7 @@ function connectSocket() {
   });
   socket.addEventListener("close", () => {
     socketReady = false;
-    if (!joined) {
+    if (!joined && !wasKicked) {
       flashStatus("Disconnected from server", "warning", 3000);
     }
   });
@@ -401,6 +408,9 @@ function connectSocket() {
 }
 
 function sendControl(type, payload = {}) {
+  if (wasKicked) {
+    return false;
+  }
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     console.warn("Socket not ready");
     return false;
@@ -415,6 +425,9 @@ function sendControl(type, payload = {}) {
 }
 
 function handleServerEvent(type, payload) {
+  if (wasKicked && type !== "session_status" && type !== "kicked") {
+    return;
+  }
   switch (type) {
     case "session_status":
       handleSessionStatus(payload);
@@ -470,6 +483,9 @@ function handleServerEvent(type, payload) {
     case "file_progress":
       handleFileProgress(payload);
       break;
+    case "kicked":
+      enterKickedState(payload || {});
+      break;
     default:
       console.log("Unknown event type", type);
   }
@@ -483,6 +499,8 @@ function handleSessionStatus({ state, username, message }) {
       updateStatusLine();
       setConnectedUi(true);
       joinOverlay.classList.add("hidden");
+      wasKicked = false;
+      kickedReason = "";
       break;
     case "connecting":
       setJoinStatus(`Connecting as ${username}...`, false);
@@ -490,10 +508,21 @@ function handleSessionStatus({ state, username, message }) {
     case "error":
       joined = false;
       setJoinStatus(message || "Connection error", true);
+      if (!wasKicked) {
+        setJoinFormEnabled(true);
+      }
+      break;
+    case "kicked":
+      enterKickedState({ reason: message });
       break;
     case "idle":
+      if (wasKicked) {
+        enterKickedState({ reason: kickedReason || message });
+        break;
+      }
       joined = false;
       setJoinStatus("Idle", false);
+      setJoinFormEnabled(true);
       break;
     default:
       console.log("Unknown session state", state);
@@ -507,6 +536,12 @@ function setJoinStatus(text, isError) {
 
 function updateStatusLine(fallback) {
   if (!joined || !currentUsername) {
+    if (wasKicked) {
+      statusEl.textContent = kickedReason || fallback || "Removed by administrator";
+      statusEl.classList.add("error");
+      statusEl.classList.remove("warning");
+      return;
+    }
     statusEl.textContent = fallback || "Offline";
     statusEl.classList.add("error");
     return;
@@ -532,7 +567,79 @@ function setConnectedUi(enabled) {
   toggleChatBtn.disabled = !enabled;
 }
 
+function setJoinFormEnabled(enabled) {
+  const allow = Boolean(enabled && !wasKicked);
+  if (nameInput) {
+    nameInput.disabled = !allow;
+  }
+  if (joinButton) {
+    joinButton.disabled = !allow;
+  }
+  if (randomNameBtn) {
+    randomNameBtn.disabled = !allow;
+  }
+}
+
+function enterKickedState(payload = {}) {
+  if (wasKicked) {
+    return;
+  }
+  wasKicked = true;
+  const reason = typeof payload.reason === "string" ? payload.reason : typeof payload.message === "string" ? payload.message : "An administrator removed you from this meeting.";
+  kickedReason = reason;
+  setConnectedUi(false);
+  setJoinFormEnabled(false);
+  joined = false;
+  currentPresenter = null;
+  micEnabled = false;
+  videoEnabled = false;
+  updateControlButtons();
+  participants = new Set();
+  renderParticipants();
+  files = new Map();
+  renderFiles();
+  chatMessagesEl.innerHTML = "";
+  videoElements.clear();
+  videoGridEl.innerHTML = "";
+  ensureVideoPlaceholder();
+  peerMedia.clear();
+  screenLastFrameAt = null;
+  showScreenMessage("Removed by admin");
+  updateStagePresenterState(false);
+  updatePresenterHighlight();
+  hideSidebar(participantsSidebar);
+  hideSidebar(chatSidebar);
+  toggleParticipantsBtn.classList.remove("active");
+  toggleChatBtn.classList.remove("active");
+  resetLeaveFlow();
+  flashStatus(reason, "error", 0);
+  updateStatusLine("Removed by administrator");
+  if (joinStatusEl) {
+    joinStatusEl.textContent = reason;
+    joinStatusEl.classList.add("error");
+  }
+  if (joinOverlay) {
+    joinOverlay.classList.remove("hidden");
+  }
+  if (joinSection) {
+    joinSection.classList.add("hidden");
+  }
+  if (leaveSection) {
+    leaveSection.classList.add("hidden");
+  }
+  if (kickedNotice) {
+    kickedNotice.classList.remove("hidden");
+  }
+  if (kickedMessageEl) {
+    kickedMessageEl.textContent = reason;
+  }
+}
+
 function initState(payload) {
+  if (wasKicked) {
+    enterKickedState({ reason: kickedReason });
+    return;
+  }
   joined = true;
   currentUsername = payload.username;
   micEnabled = false;
@@ -563,6 +670,10 @@ function initState(payload) {
 }
 
 function handleStateSnapshot(snapshot) {
+  if (wasKicked) {
+    enterKickedState({ reason: kickedReason });
+    return;
+  }
   if (!snapshot || !snapshot.connected) {
     initState(snapshot || {});
     return;
@@ -722,8 +833,8 @@ function handleScreenFrame({ frame, username }) {
 function clearScreenFrame() {
   screenLastFrameAt = null;
   if (screenImageEl) {
-    screenImageEl.src = BLANK_SCREEN_DATA_URL;
-    screenImageEl.removeAttribute("src");
+    screenImageEl.src = "";
+    screenImageEl.style.display = "none";
     screenImageEl.removeAttribute("alt");
   }
   screenWrapperEl?.classList.remove("has-content");
@@ -1048,6 +1159,10 @@ uploadButton.addEventListener("click", async () => {
 
 joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (wasKicked) {
+    setJoinStatus(kickedReason || "You were removed by an administrator.", true);
+    return;
+  }
   if (!socketReady) {
     setJoinStatus("Socket not ready, please try again", true);
     return;
@@ -1057,7 +1172,7 @@ joinForm.addEventListener("submit", (event) => {
     setJoinStatus("Please enter a name", true);
     return;
   }
-  joinButton.disabled = true;
+  setJoinFormEnabled(false);
   setJoinStatus(`Connecting as ${desiredName}...`, false);
   const accepted = sendControl("join", { username: desiredName });
   if (!accepted) {
@@ -1066,6 +1181,9 @@ joinForm.addEventListener("submit", (event) => {
 });
 
 randomNameBtn.addEventListener("click", () => {
+  if (wasKicked) {
+    return;
+  }
   requestRandomName();
 });
 

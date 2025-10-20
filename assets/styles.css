@@ -426,6 +426,15 @@ button:disabled {
   gap: 1rem;
 }
 
+.kicked-notice {
+  align-items: flex-start;
+}
+
+.kicked-notice .subtle {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
 .hidden {
   display: none;
 }

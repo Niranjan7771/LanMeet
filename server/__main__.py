@@ -81,14 +81,23 @@ async def main() -> None:
     )
     screen_server = ScreenServer(args.host, args.screen_port, session_manager)
 
+    stop_event = asyncio.Event()
+
+    async def request_shutdown() -> None:
+        if stop_event.is_set():
+            return
+        logger.info("Admin initiated shutdown")
+        stop_event.set()
+        await file_server.cleanup_storage()
+
     admin_server = AdminServer(
         session_manager,
         host=args.admin_host,
         port=args.admin_port,
         static_root=args.admin_static,
+        kick_handler=control_server.force_disconnect,
+        shutdown_handler=request_shutdown,
     )
-
-    stop_event = asyncio.Event()
 
     def _signal_handler() -> None:
         logger.info("Shutdown signal received")
@@ -112,13 +121,22 @@ async def main() -> None:
 
     await stop_event.wait()
 
+    logger.info("Shutdown signal processed; stopping services")
+
     heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
+
     await control_server.stop()
     await screen_server.stop()
     await file_server.stop()
     await video_server.stop()
     await audio_server.stop()
     await admin_server.stop()
+
+    logger.info("Shutdown complete")
 
 
 if __name__ == "__main__":

@@ -56,6 +56,46 @@ class ControlServer:
         await self._server.wait_closed()
         self._server = None
 
+    async def force_disconnect(self, username: str, *, actor: str = "admin") -> bool:
+        """Forcefully remove a client from the session and clean up media state."""
+
+        await self._session_manager.send_to(
+            username,
+            ControlAction.KICKED,
+            {
+                "reason": "An administrator removed you from this meeting.",
+                "actor": actor,
+            },
+        )
+
+        removed = await self._session_manager.unregister(
+            username,
+            event_type="user_kicked",
+            details={"actor": actor},
+        )
+
+        if not removed:
+            return False
+
+        await self._session_manager.ban_user(username)
+
+        participants = await self._session_manager.list_clients()
+        await self._session_manager.broadcast(
+            ControlAction.USER_LEFT,
+            {"username": username, "participants": participants},
+        )
+
+        tasks = []
+        if self._video_server:
+            tasks.append(self._video_server.remove_user(username))
+        if self._audio_server:
+            tasks.append(self._audio_server.remove_user(username))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        logger.info("Forcefully disconnected %s (actor=%s)", username, actor)
+        return True
+
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
         logger.info("Incoming TCP connection from %s", peer)
@@ -76,6 +116,22 @@ class ControlServer:
                     if action != ControlAction.HELLO:
                         raise ValueError("Expected HELLO as first message")
                     identity = ClientIdentity.from_dict(payload)
+                    if await self._session_manager.is_banned(identity.username):
+                        logger.warning("Rejected banned user %s", identity.username)
+                        try:
+                            writer.write(
+                                encode_control_message(
+                                    ControlAction.KICKED,
+                                    {
+                                        "reason": "An administrator removed you from this meeting.",
+                                    },
+                                )
+                            )
+                            await writer.drain()
+                        except Exception:
+                            logger.debug("Failed to notify banned user %s during handshake", identity.username)
+                        await self._session_manager.record_blocked_attempt(identity.username)
+                        return
                     client = await self._session_manager.register(identity.username, writer, peername=peer)
                     username = client.username
                     await self._session_manager.record_received(username, len(data))
