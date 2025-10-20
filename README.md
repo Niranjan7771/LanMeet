@@ -159,10 +159,10 @@ You can distribute the client and server as standalone binaries built with [PyIn
 	pip install pyinstaller
 	```
 
-2. Run the build helper from the repository root:
+2. Run the build helper from the repository root (Windows PowerShell example shown):
 
 	```powershell
-		python scripts/build_executables.py --onefile --clean
+	python scripts/build_executables.py --onefile --clean
 	```
 
 	The script packages both the server (`lanmeet-server`) and the client (`lanmeet-client`) into the `dist/` directory. Use `--skip-server` or `--skip-client` to build only one side. The `--onefile` flag bundles everything into a single executable; omit it to produce unpacked folders (faster startup).
@@ -174,7 +174,12 @@ You can distribute the client and server as standalone binaries built with [PyIn
 	.\dist\lanmeet-client.exe 192.168.1.50 --tcp-port 55000 --ui-port 8100
 	```
 
-The executables locate their bundled static assets automatically, so no extra configuration is required. Double-clicking `lanmeet-server` uses default ports and opens the admin dashboard automatically; double-clicking `lanmeet-client` prompts for the server address before launching its browser UI. If you prefer custom output directories, provide `--dist`, `--build`, or `--spec` arguments to the build helper.
+On Windows you can simply double-click the packaged binaries:
+
+- `lanmeet-server.exe` starts with default ports and automatically opens the admin dashboard in your default browser.
+- `lanmeet-client.exe` prompts for the server hostname/IP and then launches the browser UI.
+
+The executables locate their bundled static assets automatically, so no extra configuration is required. If you prefer custom output directories, provide `--dist`, `--build`, or `--spec` arguments to the build helper.
 
 ## Troubleshooting & Tips
 
