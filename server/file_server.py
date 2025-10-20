@@ -59,6 +59,7 @@ class FileServer:
         self._server.close()
         await self._server.wait_closed()
         self._server = None
+        await self.cleanup_storage()
 
     async def list_files(self) -> list[FileOffer]:
         async with self._lock:
@@ -185,6 +186,16 @@ class FileServer:
         if length == 0:
             return None
         return await reader.readexactly(length)
+
+    async def cleanup_storage(self) -> None:
+        async with self._lock:
+            files = list(self._files.values())
+            self._files.clear()
+        for stored in files:
+            try:
+                stored.path.unlink(missing_ok=True)
+            except Exception:
+                logger.exception("Failed to delete stored file %s", stored.file_id)
 
     async def _write_chunk(self, writer: asyncio.StreamWriter, data: bytes) -> None:
         writer.write(_LENGTH_STRUCT.pack(len(data)))

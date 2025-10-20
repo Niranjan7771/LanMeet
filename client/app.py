@@ -199,8 +199,10 @@ class ClientApp:
                 async for chunk in stream:
                     yield chunk
 
+            original_name = metadata.get("filename") if isinstance(metadata, dict) else None
+            safe_name = self._sanitize_filename(str(original_name or file_id))
             headers = {
-                "Content-Disposition": f"attachment; filename=\"{metadata['filename']}\""
+                "Content-Disposition": f"attachment; filename=\"{safe_name}\""
             }
             return StreamingResponse(iterator(), media_type="application/octet-stream", headers=headers)
 
@@ -223,6 +225,20 @@ class ClientApp:
                     break
             await upload.seek(0)
             return size
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """Ensure filenames used in headers contain only ASCII-safe characters."""
+        if not filename:
+            return "download.bin"
+        safe_chars = []
+        for ch in filename:
+            code = ord(ch)
+            if 32 <= code < 127 and ch not in {'\\', '"'}:
+                safe_chars.append(ch)
+            else:
+                safe_chars.append("_")
+        sanitized = "".join(safe_chars).strip()
+        return sanitized or "download.bin"
 
     def _generate_username(self) -> str:
         adjectives = [
