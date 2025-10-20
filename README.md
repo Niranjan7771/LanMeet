@@ -148,6 +148,33 @@ python scripts/cluster_launcher.py 172.17.248.69 --open-dashboard --clients 50 -
 
 The script keeps track of every spawned process and tears them down cleanly when you press Ctrl+C, making it ideal for stress-testing or demo setups.
 
+## Standalone Executables
+
+You can distribute the client and server as standalone binaries built with [PyInstaller](https://pyinstaller.org/en/stable/).
+
+1. Install PyInstaller in your virtual environment:
+
+	```powershell
+	pip install pyinstaller
+	```
+
+2. Run the build helper from the repository root:
+
+	```powershell
+		python scripts/build_executables.py --onefile --clean
+	```
+
+	The script packages both the server (`lanmeet-server`) and the client (`lanmeet-client`) into the `dist/` directory. Use `--skip-server` or `--skip-client` to build only one side. The `--onefile` flag bundles everything into a single executable; omit it to produce unpacked folders (faster startup).
+
+3. Launch the generated binaries:
+
+	```powershell
+	.\dist\lanmeet-server.exe --host 0.0.0.0 --tcp-port 55000
+	.\dist\lanmeet-client.exe 192.168.1.50 --tcp-port 55000 --ui-port 8100
+	```
+
+The executables locate their bundled static assets automatically, so no extra configuration is required. If you prefer custom output directories, provide `--dist`, `--build`, or `--spec` arguments to the build helper.
+
 ## Troubleshooting & Tips
 
 - **Heartbeat timeouts:** Run the server with `--log-level debug` and start clients with `--log-level DEBUG` to trace heartbeat send/receive intervals; matching timestamps quickly surface stalled links.

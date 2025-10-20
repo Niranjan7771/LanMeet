@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .session_manager import SessionManager
+from shared.resource_paths import resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class AdminDashboard:
     ) -> None:
         self._session_manager = session_manager
         self._app = FastAPI()
-        self._static_root = static_root or Path(__file__).resolve().parent.parent / "adminui"
+        self._static_root = static_root or resolve_path("adminui")
         assets_dir = self._static_root / "assets"
         self._shutdown_handler = shutdown_handler
         self._kick_handler = kick_handler

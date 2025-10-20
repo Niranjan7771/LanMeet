@@ -5,7 +5,6 @@ import logging
 import os
 import random
 import webbrowser
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import File, FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -27,6 +26,7 @@ from .file_client import FileClient
 from .screen_client import ScreenPublisher
 from .video_client import VideoClient
 from .audio_client import AudioClient
+from shared.resource_paths import project_root
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +96,10 @@ class ClientApp:
         self._configure_routes()
 
     def _configure_routes(self) -> None:
-        project_root = Path(__file__).resolve().parent.parent
-        static_dir = project_root / "webui"
+        root = project_root()
+        static_dir = root / "webui"
 
-        asset_candidates = [static_dir / "assets", project_root / "assets"]
+        asset_candidates = [static_dir / "assets", root / "assets"]
         assets_dir = next((candidate for candidate in asset_candidates if candidate.exists()), None)
         if not assets_dir:
             raise RuntimeError("Unable to locate static assets directory; expected one of: " + ", ".join(str(p) for p in asset_candidates))

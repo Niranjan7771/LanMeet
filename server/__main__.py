@@ -7,6 +7,8 @@ import signal
 
 from pathlib import Path
 
+from shared.resource_paths import resolve_path
+
 from shared.protocol import (
     DEFAULT_AUDIO_PORT,
     DEFAULT_FILE_PORT,
@@ -44,7 +46,7 @@ async def main() -> None:
     parser.add_argument(
         "--admin-static",
         type=Path,
-        default=Path("adminui"),
+        default=resolve_path("adminui"),
         help="Path to admin dashboard static assets",
     )
     parser.add_argument(
