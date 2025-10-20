@@ -87,6 +87,7 @@ python -m server --host 0.0.0.0 --tcp-port 55000 --video-port 56000 --audio-port
 - `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000` — UDP/TCP transports for media services (defaults from `shared.protocol`).
 - `--admin-port 8700` — admin dashboard HTTP port (default `8700`).
 - `--admin-host 0.0.0.0` — add this if the dashboard must be reachable from other machines.
+- `--open-dashboard` — open the admin dashboard in a browser after startup (enabled automatically when launched without CLI arguments, e.g., by double-clicking the executable).
 - `--log-level DEBUG` — optional verbosity control for the server (defaults to `INFO`).
 
 **Example:** Restrict access to the local machine for testing:
@@ -105,7 +106,7 @@ python -m client 192.168.1.50 --tcp-port 55000 --ui-port 8100 --username "alex"
 
 **Parameters:**
 
-- `192.168.1.50` — IP of the machine running the server.
+- `192.168.1.50` — IP of the machine running the server (if omitted, the client prompts for the value—useful when double-clicking a packaged executable).
 - `--tcp-port` — must match the server’s control port.
 - `--ui-port` — HTTP port serving the web UI (default `8100`).
 - `--username` — optional initial display name; can be changed from the UI.
@@ -173,7 +174,7 @@ You can distribute the client and server as standalone binaries built with [PyIn
 	.\dist\lanmeet-client.exe 192.168.1.50 --tcp-port 55000 --ui-port 8100
 	```
 
-The executables locate their bundled static assets automatically, so no extra configuration is required. If you prefer custom output directories, provide `--dist`, `--build`, or `--spec` arguments to the build helper.
+The executables locate their bundled static assets automatically, so no extra configuration is required. Double-clicking `lanmeet-server` uses default ports and opens the admin dashboard automatically; double-clicking `lanmeet-client` prompts for the server address before launching its browser UI. If you prefer custom output directories, provide `--dist`, `--build`, or `--spec` arguments to the build helper.
 
 ## Troubleshooting & Tips
 

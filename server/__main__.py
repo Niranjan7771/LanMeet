@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import logging
 import signal
+import sys
+import webbrowser
 
 from pathlib import Path
 
@@ -17,13 +19,13 @@ from shared.protocol import (
     DEFAULT_VIDEO_PORT,
 )
 
-from .control_server import ControlServer
-from .audio_server import AudioServer
-from .file_server import FileServer
-from .screen_server import ScreenServer
-from .video_server import VideoServer
-from .session_manager import SessionManager
-from .admin_dashboard import AdminServer
+from server.control_server import ControlServer
+from server.audio_server import AudioServer
+from server.file_server import FileServer
+from server.screen_server import ScreenServer
+from server.video_server import VideoServer
+from server.session_manager import SessionManager
+from server.admin_dashboard import AdminServer
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +52,16 @@ async def main() -> None:
         help="Path to admin dashboard static assets",
     )
     parser.add_argument(
+        "--open-dashboard",
+        action="store_true",
+        help="Open the admin dashboard in a browser after startup",
+    )
+    parser.add_argument(
+        "--no-open-dashboard",
+        action="store_true",
+        help="Suppress automatic dashboard launch",
+    )
+    parser.add_argument(
         "--log-level",
         type=str.upper,
         default="INFO",
@@ -57,6 +69,10 @@ async def main() -> None:
         help="Logging verbosity",
     )
     args = parser.parse_args()
+
+    open_dashboard = args.open_dashboard
+    if not args.open_dashboard and not args.no_open_dashboard and len(sys.argv) == 1:
+        open_dashboard = True
 
     logging.basicConfig(
         level=getattr(logging, args.log_level, logging.INFO),
@@ -118,6 +134,12 @@ async def main() -> None:
     await video_server.start(args.host, args.video_port)
     await audio_server.start(args.host, args.audio_port)
     await admin_server.start()
+
+    if open_dashboard:
+        dashboard_url = f"http://{args.admin_host}:{args.admin_port}"
+        # Give the server a moment to accept connections before opening the browser.
+        await asyncio.sleep(0.5)
+        webbrowser.open_new_tab(dashboard_url)
 
     heartbeat_task = asyncio.create_task(session_manager.heartbeat_watcher())
 

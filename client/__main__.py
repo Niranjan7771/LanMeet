@@ -6,12 +6,12 @@ import logging
 
 from shared.protocol import DEFAULT_TCP_PORT
 
-from .app import ClientApp
+from client.app import ClientApp
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LAN collaboration suite client")
-    parser.add_argument("server_host", help="Hostname or IP of the collaboration server")
+    parser.add_argument("server_host", nargs="?", help="Hostname or IP of the collaboration server")
     parser.add_argument("--tcp-port", type=int, default=DEFAULT_TCP_PORT, help="Server TCP port")
     parser.add_argument("--ui-host", default="127.0.0.1", help="Host to bind the local UI web server")
     parser.add_argument("--ui-port", type=int, default=8100, help="Port for the local UI web server")
@@ -29,9 +29,24 @@ def main() -> None:
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
     )
 
-    app = ClientApp(username=args.username, server_host=args.server_host, tcp_port=args.tcp_port)
+    server_host = args.server_host
+    if not server_host:
+        try:
+            server_host = input("Enter the server hostname or IP: ").strip()
+        except EOFError:
+            server_host = ""
+    if not server_host:
+        print("A server hostname or IP is required to start the client.")
+        return
 
-    asyncio.run(app.run(host=args.ui_host, port=args.ui_port))
+    app = ClientApp(username=args.username, server_host=server_host, tcp_port=args.tcp_port)
+
+    try:
+        asyncio.run(app.run(host=args.ui_host, port=args.ui_port))
+    except KeyboardInterrupt:
+        pass
+    except asyncio.CancelledError:
+        pass
 
 
 if __name__ == "__main__":
