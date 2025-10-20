@@ -112,6 +112,7 @@ python -m client 192.168.1.50 --tcp-port 55000 --ui-port 8100 --username "alex"
 - `--log-level` — choose `DEBUG` when you need per-heartbeat logs; defaults to `INFO`.
 
 Once started, the client automatically opens the browser at `http://127.0.0.1:8100`. Pick a display name (or randomize), then use the control bar to toggle microphone, camera, and screen sharing. A “Leave” button provides a 20-second undo window before fully disconnecting.
+If the admin kicks a participant or they leave through the UI, the accompanying command-line client now shuts itself down automatically—no Ctrl+C required.
 
 ### 6. Join through the browser
 
@@ -131,6 +132,21 @@ start http://127.0.0.1:8700
 ```
 
 You’ll see live participant counts, current presenter, recent events, and chat messages. For remote access, adjust the `--admin-host` / `--admin-port` arguments on the server command.
+
+### 8. Automate large test sessions (optional)
+
+Use the orchestration helper in `scripts/cluster_launcher.py` to spin up the server, open the admin dashboard, and launch a configurable number of client instances on sequential UI ports:
+
+```powershell
+python scripts/cluster_launcher.py 172.17.248.69 --open-dashboard --clients 50 --ui-start-port 8100 --ui-port-step 1
+```
+
+- `--python` selects the interpreter if you are not using the current environment.
+- `--server-startup-delay` and `--client-delay` tune wait times between launches.
+- `--ui-start-port` and `--ui-port-step` determine the port range for the embedded client web servers.
+- Pass `--workspace` if you need the subprocesses to run from a different working directory.
+
+The script keeps track of every spawned process and tears them down cleanly when you press Ctrl+C, making it ideal for stress-testing or demo setups.
 
 ## Troubleshooting & Tips
 
