@@ -153,6 +153,8 @@ The script keeps track of every spawned process and tears them down cleanly when
 
 You can distribute the client and server as standalone binaries built with [PyInstaller](https://pyinstaller.org/en/stable/).
 
+### Windows
+
 1. Install PyInstaller in your virtual environment:
 
 	```powershell
@@ -180,6 +182,44 @@ On Windows you can simply double-click the packaged binaries:
 - `lanmeet-client.exe` prompts for the server hostname/IP and then launches the browser UI.
 
 The executables locate their bundled static assets automatically, so no extra configuration is required. If you prefer custom output directories, provide `--dist`, `--build`, or `--spec` arguments to the build helper.
+
+### Ubuntu / Linux
+
+1. Install prerequisites (Python and media dependencies):
+
+	```bash
+	sudo apt update
+	sudo apt install python3 python3-venv python3-pip libportaudio2 libopencv-dev ffmpeg libsdl2-dev
+	```
+
+2. Create and activate a virtual environment, then install project dependencies:
+
+	```bash
+	git clone https://github.com/Niranjan7771/LanMeet.git
+	cd LanMeet
+	python3 -m venv .venv
+	source .venv/bin/activate
+	pip install -e .[development]
+	```
+
+3. Install PyInstaller inside the virtual environment and build:
+
+	```bash
+	pip install pyinstaller
+	python scripts/build_executables.py --onefile --clean
+	```
+
+	The command produces ELF binaries in `dist/lanmeet-server` and `dist/lanmeet-client`. Omit `--onefile` if you prefer folder-style bundles.
+
+4. Make the binaries executable and run them:
+
+	```bash
+	chmod +x dist/lanmeet-server dist/lanmeet-client
+	./dist/lanmeet-server --host 0.0.0.0 --tcp-port 55000
+	./dist/lanmeet-client 192.168.1.50 --tcp-port 55000 --ui-port 8100
+	```
+
+	The server opens the admin dashboard automatically; the client launches its browser UI and prompts for the server address if not supplied.
 
 ## Troubleshooting & Tips
 
