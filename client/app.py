@@ -91,6 +91,7 @@ class ClientApp:
         self._kicked = False
         self._kick_reason = None
         self._connected = False
+        self._uvicorn_server = None
         self._app = FastAPI()
         self._configure_routes()
 
@@ -343,6 +344,15 @@ class ClientApp:
         self._screen_requested = False
         self._peer_media = {}
 
+    async def _stop_ui_server(self) -> None:
+        server = self._uvicorn_server
+        if not server:
+            return
+        if getattr(server, "should_exit", False):
+            return
+        server.should_exit = True
+        await asyncio.sleep(0)
+
     async def _broadcast_session_status(self, state: str, **payload: object) -> None:
         payload_data = dict(payload)
         payload_data.setdefault("username", self._username or self._prefill_username)
@@ -413,13 +423,18 @@ class ClientApp:
 
         config = uvicorn.Config(self._app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
+        self._uvicorn_server = server
         url = f"http://{host}:{port}" if host != "0.0.0.0" else f"http://127.0.0.1:{port}"
         webbrowser.open_new_tab(url)
 
         self._connected = False
         await self._broadcast_session_status("idle")
-
-        await server.serve()
+        try:
+            await server.serve()
+        finally:
+            self._uvicorn_server = None
+            self._kicked = False
+            self._kick_reason = None
 
     async def _handle_control_message(self, action: ControlAction, payload: Dict[str, object]) -> None:
         logger.debug("Control action %s payload %s", action, payload)
@@ -595,6 +610,7 @@ class ClientApp:
             self._peer_media.clear()
             self._presenter = None
             await self._broadcast_session_status("kicked", message=reason)
+            await self._stop_ui_server()
 
         await self._ws_hub.broadcast(
             {
@@ -684,6 +700,7 @@ class ClientApp:
     async def _leave_session(self, *, reason: Optional[str] = None) -> None:
         if not self._client and not self._connected:
             await self._broadcast_session_status("idle")
+            await self._stop_ui_server()
             return
 
         username = self._username
@@ -723,6 +740,7 @@ class ClientApp:
 
         self._username = None
         await self._broadcast_session_status("idle")
+        await self._stop_ui_server()
 
     async def _ensure_media_clients(self, media: Dict[str, int]) -> None:
         if self._username is None:
