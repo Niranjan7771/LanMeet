@@ -80,22 +80,14 @@ pytest
 ### 4. Start the collaboration server
 
 ```powershell
-python -m server ^
-	--host 0.0.0.0 ^
-	--tcp-port 55000 ^
-	--video-port 56000 ^
-	--audio-port 57000 ^
-	--screen-port 58000 ^
-	--file-port 59000 ^
-	--latency-port 59500 ^
-	--admin-port 8700
+python -m server --host 0.0.0.0 --tcp-port 55000 --admin-port 8700
 ```
 
 **Flags explained:**
 
 - `--host 0.0.0.0` — bind to all interfaces so other LAN devices can connect.
 - `--tcp-port 55000` — control-channel TCP port (default `55000`).
-- `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000`, `--latency-port 59500` — transports for media services and the UDP latency echo server (defaults from `shared.protocol`).
+- `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000`, `--latency-port 59500` — override defaults for additional media services when needed (defaults ship from `shared.protocol`).
 - `--admin-port 8700` — admin dashboard HTTP port (default `8700`).
 - `--admin-host 0.0.0.0` — add this if the dashboard must be reachable from other machines.
 - `--pre-shared-key` — require clients to present a shared secret during connection and latency probes.
@@ -114,17 +106,19 @@ The console logs each media service listener, prints URLs for the admin dashboar
 ### 5. Launch a client runtime per participant
 
 ```powershell
-python -m client 192.168.1.50 --tcp-port 55000 --ui-port 8100 --username "alex"
+python -m client <SERVER_IP> --tcp-port 55000 --ui-port 8100 --username "alex"
 ```
 
 **Parameters:**
 
-- `192.168.1.50` — IP of the machine running the server (if omitted, the client prompts for the value—useful when double-clicking a packaged executable).
+- `<SERVER_IP>` — IP or hostname of the machine running the server (if omitted, the client prompts for the value—useful when double-clicking a packaged executable).
 - `--tcp-port` — must match the server’s control port.
 - `--ui-port` — HTTP port serving the web UI (default `8100`).
 - `--username` — optional initial display name; can be changed from the UI.
 - `--pre-shared-key` — shared secret that must match the server when PSK enforcement is enabled.
 - `--log-level` — choose `DEBUG` when you need per-heartbeat logs; defaults to `INFO`.
+
+> Replace `<SERVER_IP>` with the actual address or hostname of the machine running the server.
 
 Once started, the client automatically opens the browser at `http://127.0.0.1:8100`. Pick a display name (or randomize), then use the control bar to toggle microphone, camera, and screen sharing. A “Leave” button provides a 20-second undo window before fully disconnecting. When an admin-configured meeting time limit elapses, the client shows a “time limit reached” banner and exits on its own—no manual confirmation required.
 If the admin kicks a participant or they leave through the UI, the accompanying command-line client now shuts itself down automatically—no Ctrl+C required.
@@ -154,7 +148,7 @@ You’ll see live participant counts, current presenter, recent events, chat mes
 Use the orchestration helper in `scripts/cluster_launcher.py` to spin up the server, open the admin dashboard, and launch a configurable number of client instances on sequential UI ports:
 
 ```powershell
-python scripts/cluster_launcher.py 172.17.248.69 --open-dashboard --clients 50 --ui-start-port 8100 --ui-port-step 1
+python scripts/cluster_launcher.py <SERVER_IP> --open-dashboard --clients 50 --ui-start-port 8100 --ui-port-step 1
 ```
 
 - `--python` selects the interpreter if you are not using the current environment.
@@ -187,8 +181,8 @@ You can distribute the client and server as standalone binaries built with [PyIn
 3. Launch the generated binaries:
 
 	```powershell
-	.\dist\lanmeet-server.exe --host 0.0.0.0 --tcp-port 55000
-	.\dist\lanmeet-client.exe 192.168.1.50 --tcp-port 55000 --ui-port 8100
+	\.\dist\lanmeet-server.exe --host 0.0.0.0 --tcp-port 55000
+	\.\dist\lanmeet-client.exe <SERVER_IP> --tcp-port 55000 --ui-port 8100
 	```
 
 On Windows you can simply double-click the packaged binaries:
@@ -231,7 +225,7 @@ The executables locate their bundled static assets automatically, so no extra co
 	```bash
 	chmod +x dist/lanmeet-server dist/lanmeet-client
 	./dist/lanmeet-server --host 0.0.0.0 --tcp-port 55000
-	./dist/lanmeet-client 192.168.1.50 --tcp-port 55000 --ui-port 8100
+	./dist/lanmeet-client <SERVER_IP> --tcp-port 55000 --ui-port 8100
 	```
 
 	The server opens the admin dashboard automatically; the client launches its browser UI and prompts for the server address if not supplied.
