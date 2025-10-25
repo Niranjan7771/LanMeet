@@ -13,7 +13,7 @@ The LAN Collaboration Suite delivers real-time audio, video, screen sharing, cha
 | **Reactions & hotkeys** | Emoji reactions float across the stage; keyboard shortcuts toggle mic, camera, hand, reactions, and presentation. |
 | **Reliable reconnect** | Clients automatically back off and reconnect when the control channel drops, preserving session context. |
 | **File transfers** | Supports multiple simultaneous uploads, resumable chunks, drag-and-drop uploads, and direct browser downloads/share links. |
-| **Security options** | Optional pre-shared key gate keeps both TCP control and UDP latency probe traffic. |
+| **Security options** | Operates entirely on a trusted LAN/VPN; pair with your own network controls or gateways as needed. |
 | **Operational tooling** | Admin dashboard shows connected users, presenter status, chat log, recent events, and health metrics; configure meeting time limits, broadcast notices, latency summaries, storage usage, tail live server logs, and trigger a single-click shutdown that disconnects participants and clears temporary files before services exit. |
 
 ## Project Structure
@@ -90,15 +90,14 @@ python -m server --host 0.0.0.0 --tcp-port 55000 --admin-port 8700
 - `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000`, `--latency-port 59500` — override defaults for additional media services when needed (defaults ship from `shared.protocol`).
 - `--admin-port 8700` — admin dashboard HTTP port (default `8700`).
 - `--admin-host 0.0.0.0` — add this if the dashboard must be reachable from other machines.
-- `--pre-shared-key` — require clients to present a shared secret during connection and latency probes.
 - `--log-file logs/server.log` — enable rotating file logs alongside console output (`--log-max-bytes` / `--log-backup-count` fine tune rotation).
 - `--open-dashboard` — open the admin dashboard in a browser after startup (enabled automatically when launched without CLI arguments, e.g., by double-clicking the executable).
 - `--log-level DEBUG` — optional verbosity control for the server (defaults to `INFO`).
 
-**Example:** Restrict access to the local machine for testing and require a pre-shared key:
+**Example:** Restrict access to the local machine for testing:
 
 ```powershell
-python -m server --host 127.0.0.1 --admin-host 127.0.0.1 --pre-shared-key "secret123"
+python -m server --host 127.0.0.1 --admin-host 127.0.0.1
 ```
 
 The console logs each media service listener, prints URLs for the admin dashboard, and now records heartbeat diagnostics when run with `--log-level debug`.
@@ -115,7 +114,6 @@ python -m client <SERVER_IP> --tcp-port 55000 --ui-port 8100 --username "alex"
 - `--tcp-port` — must match the server’s control port.
 - `--ui-port` — HTTP port serving the web UI (default `8100`).
 - `--username` — optional initial display name; can be changed from the UI.
-- `--pre-shared-key` — shared secret that must match the server when PSK enforcement is enabled.
 - `--log-level` — choose `DEBUG` when you need per-heartbeat logs; defaults to `INFO`.
 
 > Replace `<SERVER_IP>` with the actual address or hostname of the machine running the server.
@@ -234,7 +232,6 @@ The executables locate their bundled static assets automatically, so no extra co
 
 - **Heartbeat timeouts:** Run the server with `--log-level debug` and start clients with `--log-level DEBUG` to trace heartbeat send/receive intervals; matching timestamps quickly surface stalled links.
 - **Firewall rules:** Allow inbound UDP/TCP on the configured ports (defaults: TCP `55000`, UDP `56000` series, UDP `59500` for latency, HTTP `8100` & `8700`).
-- **Pre-shared key mismatch:** If the client immediately drops back to the join screen, double-check the `--pre-shared-key` value on both the server and client CLI.
 - **Auto reconnect:** The client automatically retries with exponential backoff; the UI shows a reconnect banner. Use the Leave button if you want to abort the retry loop.
 - **No video/audio devices:** The video and audio modules degrade gracefully; check logs for hardware warnings.
 - **File transfer limits:** Large uploads depend on LAN speed; progress updates appear in the status line and File Sharing list. Use drag-and-drop for quick multi-file uploads.

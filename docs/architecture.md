@@ -28,7 +28,7 @@ The system is a hub-and-spoke client/server application operating exclusively on
 | File sharing           | TCP       | Client ↔ Server  | Chunked transfers with resumable tokens. |
 | Control signalling     | TCP       | Client ↔ Server  | Session join/leave, presence sync, typing state, reactions, presenter control, hand raises. |
 | Heartbeat telemetry    | TCP       | Client → Server  | Clients emit periodic heartbeats; the server records timing to detect stalled control links and triggers reconnect flows. |
-| Latency probe service  | UDP       | Client ↔ Server  | Signed echo packets measure round-trip time and jitter; rejects traffic without the optional pre-shared key. |
+| Latency probe service  | UDP       | Client ↔ Server  | Signed echo packets measure round-trip time and jitter; network operators can restrict access using external controls. |
 | UI bridge              | WebSocket (loopback) | Browser ↔ Client daemon | Bridge between web UI and client runtime for local interactions. |
 
 ## Modules
@@ -59,7 +59,7 @@ The system is a hub-and-spoke client/server application operating exclusively on
 
 6. **Latency Echo Service (`server/latency_server.py`)**
    - UDP responder that measures round-trip time for each client probe.
-   - Enforces the pre-shared key when enabled to prevent spoofed latency injections.
+   - Designed for trusted LAN/VPN deployments; pair with perimeter firewalls or NAT rules to prevent spoofed probes.
 
 7. **Admin HTTP (`server/admin_dashboard.py`)**
    - Serves dashboard assets, exposes `/api/health`, and relays kick/shutdown commands, broadcast notices, and time-limit configuration.
@@ -84,7 +84,7 @@ The system is a hub-and-spoke client/server application operating exclusively on
 
 ## Security & Resilience
 
-- **Pre-shared key handshake**: When the server is launched with `--pre-shared-key`, clients must provide the same secret during the TCP HELLO and every latency probe. Mismatches are rejected immediately.
+- **Trusted network perimeter**: Deploy behind LAN/VPN firewalls, ACLs, or other access controls to ensure only authorized hosts reach the control, media, and latency services.
 - **Presence deltas**: `presence_sync` provides the full roster at join time; `presence_update` broadcasts deltas for individual participants to keep traffic lightweight.
 - **Reconnect loop**: The client runtime schedules exponential backoff retries when the control channel drops, notifying the web UI so participants see a reconnect banner instead of a hard failure.
 - **Latency telemetry**: The latency probe caches round-trip metrics, exposes them in the UI, and forwards updates to the control server for global presence visibility.
