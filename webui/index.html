@@ -46,6 +46,8 @@
         <div class="header-left">
           <h1>LAN Collaboration Suite</h1>
           <span class="status" id="status">Offline</span>
+          <span class="latency-badge" id="latency-badge" aria-live="polite">Latency: --</span>
+          <span class="meeting-timer" id="meeting-timer" aria-live="polite">No time limit</span>
         </div>
         <div class="header-right">
           <button id="toggle-mic" class="control-button" disabled title="Toggle Microphone">
@@ -56,6 +58,23 @@
             <span class="icon">🎥</span>
             <span class="label">Camera</span>
           </button>
+          <button id="toggle-hand" class="control-button" disabled title="Raise Hand">
+            <span class="icon">✋</span>
+            <span class="label">Hand</span>
+          </button>
+          <div class="reaction-control">
+            <button id="reactions-btn" class="control-button" disabled title="Send Reaction" aria-haspopup="true" aria-expanded="false">
+              <span class="icon">😊</span>
+              <span class="label">React</span>
+            </button>
+            <div id="reaction-picker" class="reaction-picker hidden" role="menu">
+              <button type="button" class="reaction-option" data-reaction="👍" role="menuitem">👍</button>
+              <button type="button" class="reaction-option" data-reaction="🎉" role="menuitem">🎉</button>
+              <button type="button" class="reaction-option" data-reaction="👏" role="menuitem">👏</button>
+              <button type="button" class="reaction-option" data-reaction="❤️" role="menuitem">❤️</button>
+              <button type="button" class="reaction-option" data-reaction="😂" role="menuitem">😂</button>
+            </div>
+          </div>
           <button id="toggle-present" class="control-button" disabled title="Share Screen">
             <span class="icon">🖥️</span>
             <span class="label">Present</span>
@@ -66,6 +85,8 @@
           </button>
         </div>
       </header>
+
+  <div id="admin-banner" class="admin-banner hidden" role="status" aria-live="assertive"></div>
 
       <!-- Main Meeting Area -->
       <div class="meeting-container">
@@ -92,6 +113,8 @@
           <div id="video-grid" class="video-grid">
             <p class="placeholder">Waiting for participants…</p>
           </div>
+
+          <div id="reaction-stream" class="reaction-stream" aria-live="polite"></div>
         </main>
 
         <!-- Right Sidebar (Chat & Files) -->
@@ -110,6 +133,7 @@
           <!-- Chat Tab -->
           <div class="tab-content active" id="chat-tab">
             <div id="chat-messages" class="chat-messages"></div>
+            <div id="typing-indicator" class="typing-indicator hidden" aria-live="polite"></div>
             <form id="chat-form" class="chat-form">
               <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off" />
               <button type="submit">Send</button>
@@ -122,6 +146,7 @@
               <input type="file" id="file-input" />
               <button id="upload-file">Upload</button>
             </div>
+            <p class="drop-hint">Drag & drop files anywhere to upload quickly.</p>
             <ul id="file-list" class="file-list"></ul>
           </div>
         </aside>
@@ -146,6 +171,8 @@
         </div>
       </footer>
     </div>
+
+    <div id="drag-overlay" class="drag-overlay hidden" aria-live="assertive">Drop files to upload</div>
 
     <script src="/assets/main.js" type="module"></script>
   </body>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import struct
 import uuid
 from dataclasses import dataclass
@@ -191,14 +192,55 @@ class FileServer:
         async with self._lock:
             files = list(self._files.values())
             self._files.clear()
-        for stored in files:
-            try:
-                stored.path.unlink(missing_ok=True)
-            except Exception:
-                logger.exception("Failed to delete stored file %s", stored.file_id)
+
+        await asyncio.to_thread(self._purge_storage_contents, files)
 
     async def _write_chunk(self, writer: asyncio.StreamWriter, data: bytes) -> None:
         writer.write(_LENGTH_STRUCT.pack(len(data)))
         if data:
             writer.write(data)
         await writer.drain()
+
+    def _purge_storage_contents(self, tracked_files: list[StoredFile]) -> None:
+        removed: set[Path] = set()
+        tracked_deleted = 0
+        residual_deleted = 0
+
+        for stored in tracked_files:
+            try:
+                if stored.path.exists():
+                    stored.path.unlink()
+                    tracked_deleted += 1
+                removed.add(stored.path)
+            except Exception:
+                logger.exception("Failed to delete stored file %s", stored.file_id)
+
+        try:
+            for entry in self._storage_dir.iterdir():
+                try:
+                    if entry in removed and not entry.exists():
+                        continue
+                    if entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=True)
+                        residual_deleted += 1
+                    else:
+                        if entry.exists():
+                            entry.unlink()
+                            residual_deleted += 1
+                except Exception:
+                    logger.exception("Failed to remove storage entry %s", entry)
+        except FileNotFoundError:
+            return
+
+        try:
+            self._storage_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.exception("Failed to recreate storage directory %s", self._storage_dir)
+
+        if tracked_deleted or residual_deleted:
+            logger.info(
+                "Cleared %s tracked files and %s residual entries from %s",
+                tracked_deleted,
+                residual_deleted,
+                self._storage_dir,
+            )

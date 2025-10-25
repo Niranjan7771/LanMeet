@@ -34,6 +34,9 @@ class ControlServer:
         video_server: Optional["VideoServer"] = None,
         audio_server: Optional["AudioServer"] = None,
         media_config: Optional[dict] = None,
+        *,
+        pre_shared_key: Optional[str] = None,
+        latency_port: Optional[int] = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -43,6 +46,15 @@ class ControlServer:
         self._video_server = video_server
         self._audio_server = audio_server
         self._media_config = media_config or {}
+        if latency_port is not None:
+            self._media_config.setdefault("latency_port", latency_port)
+        self._pre_shared_key = pre_shared_key
+        self._latency_port = latency_port
+
+    async def _broadcast_presence_entry(self, username: str) -> None:
+        entry = await self._session_manager.get_presence_entry(username)
+        if entry:
+            await self._session_manager.broadcast(ControlAction.PRESENCE_UPDATE, entry)
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle_client, self._host, self._port)
@@ -84,6 +96,11 @@ class ControlServer:
             ControlAction.USER_LEFT,
             {"username": username, "participants": participants},
         )
+        presence = await self._session_manager.get_presence_snapshot()
+        await self._session_manager.broadcast(
+            ControlAction.PRESENCE_SYNC,
+            {"participants": presence},
+        )
 
         tasks = []
         if self._video_server:
@@ -116,6 +133,22 @@ class ControlServer:
                     if action != ControlAction.HELLO:
                         raise ValueError("Expected HELLO as first message")
                     identity = ClientIdentity.from_dict(payload)
+                    if self._pre_shared_key and identity.pre_shared_key != self._pre_shared_key:
+                        logger.warning("Rejected client %s due to invalid pre-shared key", identity.username)
+                        try:
+                            writer.write(
+                                encode_control_message(
+                                    ControlAction.ERROR,
+                                    {
+                                        "reason": "Authentication failed",
+                                        "code": "auth_failed",
+                                    },
+                                )
+                            )
+                            await writer.drain()
+                        except Exception:
+                            logger.debug("Failed to notify unauthenticated client %s", identity.username)
+                        return
                     if await self._session_manager.is_banned(identity.username):
                         logger.warning("Rejected banned user %s", identity.username)
                         try:
@@ -147,6 +180,7 @@ class ControlServer:
                         file_offers = [offer.to_dict() for offer in await self._file_server.list_files()]
                     presenter = await self._session_manager.get_presenter()
                     media_state = await self._session_manager.get_media_state_snapshot()
+                    presence = await self._session_manager.get_presence_snapshot()
                     client.send(
                         ControlAction.WELCOME,
                         {
@@ -157,9 +191,17 @@ class ControlServer:
                             "media": self._media_config,
                             "presenter": presenter,
                             "media_state": media_state,
+                            "presence": presence,
+                            "time_limit": await self._session_manager.get_time_limit_status(),
                         },
                     )
                     await writer.drain()
+                    await self._session_manager.broadcast(
+                        ControlAction.PRESENCE_SYNC,
+                        {
+                            "participants": presence,
+                        },
+                    )
             assert username is not None
 
             while True:
@@ -184,6 +226,11 @@ class ControlServer:
                     await self._session_manager.broadcast(
                         ControlAction.USER_LEFT,
                         {"username": username, "participants": participants},
+                    )
+                    presence = await self._session_manager.get_presence_snapshot()
+                    await self._session_manager.broadcast(
+                        ControlAction.PRESENCE_SYNC,
+                        {"participants": presence},
                     )
                 tasks = []
                 if self._video_server:
@@ -250,6 +297,7 @@ class ControlServer:
                     ControlAction.VIDEO_STATUS,
                     state,
                 )
+                await self._broadcast_presence_entry(username)
             return
 
         if action == ControlAction.AUDIO_STATUS:
@@ -260,6 +308,54 @@ class ControlServer:
                     ControlAction.AUDIO_STATUS,
                     state,
                 )
+                await self._broadcast_presence_entry(username)
+            return
+
+        if action == ControlAction.TYPING_STATUS:
+            result = await self._session_manager.set_typing(
+                username,
+                bool(payload.get("is_typing", False)),
+            )
+            if result:
+                await self._session_manager.broadcast(ControlAction.TYPING_STATUS, result)
+                await self._broadcast_presence_entry(username)
+            return
+
+        if action == ControlAction.HAND_STATUS:
+            raised = bool(payload.get("hand_raised", False))
+            result = await self._session_manager.set_hand_status(username, raised=raised)
+            if result:
+                await self._session_manager.broadcast(ControlAction.HAND_STATUS, result)
+                presence = await self._session_manager.get_presence_snapshot()
+                await self._session_manager.broadcast(
+                    ControlAction.PRESENCE_SYNC,
+                    {"participants": presence},
+                )
+                await self._broadcast_presence_entry(username)
+            return
+
+        if action == ControlAction.REACTION:
+            reaction = {
+                "username": username,
+                "reaction": payload.get("reaction", ""),
+                "timestamp_ms": payload.get("timestamp_ms"),
+            }
+            await self._session_manager.broadcast(ControlAction.REACTION, reaction)
+            return
+
+        if action == ControlAction.LATENCY_UPDATE:
+            latency_ms = float(payload.get("latency_ms", 0.0))
+            jitter_ms = payload.get("jitter_ms")
+            if jitter_ms is not None:
+                jitter_ms = float(jitter_ms)
+            result = await self._session_manager.update_latency(
+                username,
+                latency_ms=latency_ms,
+                jitter_ms=jitter_ms,
+            )
+            if result:
+                await self._session_manager.broadcast(ControlAction.LATENCY_UPDATE, result)
+                await self._broadcast_presence_entry(username)
             return
 
         # TODO: handle screen, file control messages.

@@ -27,6 +27,12 @@ class ConnectedClient:
     bytes_received: int = 0
     audio_enabled: bool = False
     video_enabled: bool = False
+    is_typing: bool = False
+    last_typing_at: float = field(default_factory=lambda: 0.0)
+    hand_raised: bool = False
+    latency_ms: Optional[float] = None
+    jitter_ms: Optional[float] = None
+    last_latency_update: float = field(default_factory=lambda: 0.0)
 
     def touch(self) -> None:
         self.last_seen = time.monotonic()
@@ -47,6 +53,14 @@ class SessionManager:
         self._chat_history: list[ChatMessage] = []
         self._event_log: list[dict] = []
         self._banned_usernames: Set[str] = set()
+        self._presence_cache: Dict[str, dict[str, object]] = {}
+        self._session_started_at: float = time.time()
+        self._time_limit_started_at: Optional[float] = None
+        self._time_limit_duration_seconds: Optional[float] = None
+        self._time_limit_end_timestamp: Optional[float] = None
+        self._shutdown_requested: bool = False
+        self._shutdown_reason: Optional[str] = None
+        self._shutdown_requested_at: Optional[float] = None
 
     async def register(self, username: str, writer: asyncio.StreamWriter, peername: Optional[Tuple[str, ...]] = None) -> ConnectedClient:
         async with self._lock:
@@ -62,6 +76,8 @@ class SessionManager:
                         client.peer_port = int(peername[1])
                     except (TypeError, ValueError):
                         client.peer_port = None
+            if not self._clients:
+                self._session_started_at = time.time()
             self._clients[username] = client
             logger.info("Registered client %s", username)
             self._record_event(
@@ -70,6 +86,7 @@ class SessionManager:
                     "username": username,
                 },
             )
+            self._presence_cache[username] = self._client_presence_payload(client)
             return client
 
     async def unregister(
@@ -85,6 +102,7 @@ class SessionManager:
                 return False
             if self._presenter == username:
                 self._presenter = None
+            self._presence_cache.pop(username, None)
             try:
                 client.writer.close()
             except Exception:  # pragma: no cover - cleanup best effort
@@ -110,6 +128,7 @@ class SessionManager:
                 client.audio_enabled = audio_enabled
             if video_enabled is not None:
                 client.video_enabled = video_enabled
+            self._presence_cache[username] = self._client_presence_payload(client)
             return {
                 "username": username,
                 "audio_enabled": client.audio_enabled,
@@ -118,13 +137,14 @@ class SessionManager:
 
     async def get_media_state_snapshot(self) -> dict[str, dict[str, bool]]:
         async with self._lock:
-            return {
-                username: {
+            snapshot: dict[str, dict[str, bool]] = {}
+            for username, client in self._clients.items():
+                snapshot[username] = {
                     "audio_enabled": client.audio_enabled,
                     "video_enabled": client.video_enabled,
                 }
-                for username, client in self._clients.items()
-            }
+                self._presence_cache[username] = self._client_presence_payload(client)
+            return snapshot
 
     async def grant_presenter(self, username: str) -> bool:
         async with self._lock:
@@ -225,6 +245,15 @@ class SessionManager:
         async with self._lock:
             return list(self._chat_history)
 
+    async def get_presence_entry(self, username: str) -> Optional[dict[str, object]]:
+        async with self._lock:
+            client = self._clients.get(username)
+            if client is None:
+                return None
+            payload = self._client_presence_payload(client)
+            self._presence_cache[username] = payload
+            return payload
+
     async def list_clients(self) -> list[str]:
         async with self._lock:
             return list(self._clients.keys())
@@ -250,6 +279,10 @@ class SessionManager:
                         "bandwidth_bps": _calculate_rate(client.bytes_sent, client.connected_at),
                         "audio_enabled": client.audio_enabled,
                         "video_enabled": client.video_enabled,
+                        "hand_raised": client.hand_raised,
+                        "is_typing": client.is_typing,
+                        "latency_ms": client.latency_ms,
+                        "jitter_ms": client.jitter_ms,
                     }
                 )
                 usernames.append(client.username)
@@ -263,6 +296,92 @@ class SessionManager:
                 "participant_usernames": usernames,
                 "participant_count": len(usernames),
                 "banned_usernames": sorted(self._banned_usernames),
+                "latency_summary": self._latency_summary_locked(),
+                "time_limit": self._build_time_limit_status_locked(now=time.time()),
+                "session_started_at": self._session_started_at,
+                "shutdown_requested": self._shutdown_requested,
+                "shutdown_reason": self._shutdown_reason,
+                "shutdown_requested_at": self._shutdown_requested_at,
+            }
+
+    async def mark_shutdown_requested(self, *, reason: str) -> None:
+        timestamp = time.time()
+        async with self._lock:
+            if self._shutdown_requested:
+                return
+            self._shutdown_requested = True
+            self._shutdown_reason = reason
+            self._shutdown_requested_at = timestamp
+            self._record_event(
+                "shutdown_requested",
+                {
+                    "reason": reason,
+                    "timestamp": timestamp,
+                },
+            )
+
+    async def get_presence_snapshot(self) -> list[dict[str, object]]:
+        async with self._lock:
+            snapshot: list[dict[str, object]] = []
+            for client in self._clients.values():
+                payload = self._client_presence_payload(client)
+                self._presence_cache[client.username] = payload
+                snapshot.append(payload)
+            return snapshot
+
+    async def set_typing(self, username: str, is_typing: bool) -> Optional[dict[str, object]]:
+        async with self._lock:
+            client = self._clients.get(username)
+            if client is None:
+                return None
+            client.is_typing = is_typing
+            client.last_typing_at = time.time()
+            self._presence_cache[username] = self._client_presence_payload(client)
+            return {
+                "username": username,
+                "is_typing": is_typing,
+                "timestamp_ms": int(client.last_typing_at * 1000),
+            }
+
+    async def set_hand_status(self, username: str, *, raised: bool) -> Optional[dict[str, object]]:
+        async with self._lock:
+            client = self._clients.get(username)
+            if client is None:
+                return None
+            if client.hand_raised == raised:
+                self._presence_cache[username] = self._client_presence_payload(client)
+                return {
+                    "username": username,
+                    "hand_raised": client.hand_raised,
+                }
+            client.hand_raised = raised
+            event_type = "hand_raised" if raised else "hand_lowered"
+            self._record_event(
+                event_type,
+                {
+                    "username": username,
+                },
+            )
+            self._presence_cache[username] = self._client_presence_payload(client)
+            return {
+                "username": username,
+                "hand_raised": raised,
+            }
+
+    async def update_latency(self, username: str, *, latency_ms: float, jitter_ms: Optional[float] = None) -> Optional[dict[str, object]]:
+        async with self._lock:
+            client = self._clients.get(username)
+            if client is None:
+                return None
+            client.latency_ms = latency_ms
+            client.jitter_ms = jitter_ms
+            client.last_latency_update = time.time()
+            self._presence_cache[username] = self._client_presence_payload(client)
+            return {
+                "username": username,
+                "latency_ms": latency_ms,
+                "jitter_ms": jitter_ms,
+                "timestamp_ms": int(client.last_latency_update * 1000),
             }
 
     async def heartbeat_watcher(self) -> None:
@@ -290,6 +409,7 @@ class SessionManager:
             if client:
                 elapsed = time.monotonic() - client.last_seen
                 client.touch()
+                self._presence_cache[username] = self._client_presence_payload(client)
                 logger.debug("Heartbeat received from %s (%.2fs since last)", username, elapsed)
 
     async def ban_user(self, username: str) -> None:
@@ -299,6 +419,47 @@ class SessionManager:
     async def unban_user(self, username: str) -> None:
         async with self._lock:
             self._banned_usernames.discard(username)
+
+    async def disconnect_all(self, *, reason: str = "Server shutting down") -> None:
+        """Forcefully disconnect every connected client with a shutdown reason."""
+
+        drains: list[Awaitable[None]] = []
+        waiters: list[Awaitable[None]] = []
+        async with self._lock:
+            if not self._clients:
+                return
+            clients = list(self._clients.values())
+            for client in clients:
+                try:
+                    client.send(
+                        ControlAction.KICKED,
+                        {
+                            "reason": reason,
+                            "actor": "system",
+                        },
+                    )
+                    drains.append(client.writer.drain())
+                except Exception:
+                    logger.exception("Failed to notify %s about shutdown", client.username)
+                try:
+                    client.writer.close()
+                    waiters.append(client.writer.wait_closed())
+                except Exception:
+                    logger.exception("Error while closing writer for %s during shutdown", client.username)
+            disconnected = len(clients)
+            self._clients.clear()
+            self._presence_cache.clear()
+            self._presenter = None
+            self._record_event(
+                "server_shutdown",
+                {
+                    "reason": reason,
+                    "disconnected": disconnected,
+                },
+            )
+        pending = drains + waiters
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def is_banned(self, username: str) -> bool:
         async with self._lock:
@@ -317,6 +478,72 @@ class SessionManager:
                 },
             )
 
+    async def get_recent_events(self, limit: int = 300) -> list[dict[str, object]]:
+        async with self._lock:
+            if limit <= 0:
+                return []
+            return list(self._event_log[-limit:])
+
+    async def set_time_limit(
+        self,
+        *,
+        duration_minutes: Optional[float],
+        start_timestamp: Optional[float] = None,
+        actor: str = "admin",
+    ) -> dict[str, object]:
+        now = time.time()
+        async with self._lock:
+            if duration_minutes is None or duration_minutes <= 0:
+                was_active = self._time_limit_duration_seconds is not None
+                self._time_limit_duration_seconds = None
+                self._time_limit_end_timestamp = None
+                self._time_limit_started_at = None
+                if was_active:
+                    self._record_event(
+                        "time_limit_cleared",
+                        {
+                            "actor": actor,
+                        },
+                    )
+            else:
+                duration_seconds = max(60.0, float(duration_minutes) * 60.0)
+                start_time = start_timestamp if start_timestamp is not None else self._time_limit_started_at or now
+                self._time_limit_started_at = start_time
+                self._time_limit_duration_seconds = duration_seconds
+                self._time_limit_end_timestamp = start_time + duration_seconds
+                self._record_event(
+                    "time_limit_set",
+                    {
+                        "actor": actor,
+                        "duration_minutes": round(duration_seconds / 60.0, 2),
+                    },
+                )
+            status = self._build_time_limit_status_locked(now=now)
+        return status
+
+    async def get_time_limit_status(self) -> dict[str, object]:
+        async with self._lock:
+            return self._build_time_limit_status_locked()
+
+    async def record_admin_notice(self, message: str, *, level: str = "info", actor: str = "admin") -> dict[str, object]:
+        level_normalized = level.lower()
+        timestamp = time.time()
+        async with self._lock:
+            self._record_event(
+                "admin_notice",
+                {
+                    "message": message,
+                    "level": level_normalized,
+                    "actor": actor,
+                },
+            )
+        return {
+            "message": message,
+            "level": level_normalized,
+            "actor": actor,
+            "timestamp": timestamp,
+        }
+
     def _record_event(self, event_type: str, details: Dict[str, object]) -> None:
         event = {
             "type": event_type,
@@ -326,6 +553,68 @@ class SessionManager:
         self._event_log.append(event)
         if len(self._event_log) > 1000:
             self._event_log.pop(0)
+
+    def _client_presence_payload(self, client: ConnectedClient) -> dict[str, object]:
+        return {
+            "username": client.username,
+            "is_presenter": client.is_presenter,
+            "audio_enabled": client.audio_enabled,
+            "video_enabled": client.video_enabled,
+            "hand_raised": client.hand_raised,
+            "is_typing": client.is_typing,
+            "latency_ms": client.latency_ms,
+            "jitter_ms": client.jitter_ms,
+            "last_seen_seconds": max(0.0, time.monotonic() - client.last_seen),
+        }
+
+    def _latency_summary_locked(self) -> dict[str, object]:
+        latencies = [client.latency_ms for client in self._clients.values() if client.latency_ms is not None]
+        if not latencies:
+            return {
+                "sample_count": 0,
+                "average_ms": None,
+                "min_ms": None,
+                "max_ms": None,
+            }
+        sample_count = len(latencies)
+        average_ms = sum(latencies) / sample_count
+        return {
+            "sample_count": sample_count,
+            "average_ms": average_ms,
+            "min_ms": min(latencies),
+            "max_ms": max(latencies),
+        }
+
+    def _build_time_limit_status_locked(self, *, now: Optional[float] = None) -> dict[str, object]:
+        current_time = now if now is not None else time.time()
+        if self._time_limit_duration_seconds is None or self._time_limit_started_at is None:
+            return {
+                "is_active": False,
+                "duration_seconds": None,
+                "remaining_seconds": None,
+                "end_timestamp": None,
+                "started_at": None,
+                "is_expired": False,
+                "progress": None,
+                "updated_at": current_time,
+            }
+        duration_seconds = max(1.0, self._time_limit_duration_seconds)
+        end_timestamp = self._time_limit_end_timestamp or (self._time_limit_started_at + duration_seconds)
+        remaining_seconds = max(0.0, end_timestamp - current_time)
+        elapsed_seconds = max(0.0, current_time - self._time_limit_started_at)
+        progress = None
+        if duration_seconds > 0:
+            progress = min(1.0, max(0.0, elapsed_seconds / duration_seconds))
+        return {
+            "is_active": True,
+            "duration_seconds": int(round(duration_seconds)),
+            "remaining_seconds": int(round(remaining_seconds)),
+            "end_timestamp": float(end_timestamp),
+            "started_at": float(self._time_limit_started_at),
+            "is_expired": remaining_seconds <= 0.0,
+            "progress": progress,
+            "updated_at": current_time,
+        }
 
 
 def _calculate_rate(total_bytes: int, connected_at: float) -> float:

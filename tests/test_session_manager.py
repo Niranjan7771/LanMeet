@@ -85,3 +85,27 @@ async def test_ban_user_prevents_registration() -> None:
 
     with pytest.raises(PermissionError):
         await manager.register("carol", DummyWriter())
+
+
+@pytest.mark.anyio
+async def test_time_limit_set_and_clear() -> None:
+    manager = SessionManager()
+    status = await manager.set_time_limit(duration_minutes=30, start_timestamp=1_000.0, actor="tester")
+
+    assert status["is_active"] is True
+    assert status["duration_seconds"] == 1800
+    assert status["end_timestamp"] == pytest.approx(2800.0, rel=0.001)
+
+    cleared = await manager.set_time_limit(duration_minutes=None, actor="tester")
+    assert cleared["is_active"] is False
+    assert cleared["remaining_seconds"] is None
+
+
+@pytest.mark.anyio
+async def test_record_admin_notice_logs_event() -> None:
+    manager = SessionManager()
+
+    notice = await manager.record_admin_notice("Test notice", level="warning", actor="ops")
+    assert notice["level"] == "warning"
+    events = await manager.get_recent_events(limit=5)
+    assert any(event["type"] == "admin_notice" for event in events)

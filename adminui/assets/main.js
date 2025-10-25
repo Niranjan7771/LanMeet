@@ -9,6 +9,32 @@ const shutdownButton = document.getElementById("action-shutdown");
 const shutdownLabel = shutdownButton ? shutdownButton.textContent : "";
 const bannedListEl = document.getElementById("banned-list");
 const bannedEmptyEl = document.getElementById("banned-empty");
+const timeRemainingEl = document.getElementById("time-remaining");
+const timeTotalEl = document.getElementById("time-total");
+const latencyAverageEl = document.getElementById("latency-average");
+const latencyRangeEl = document.getElementById("latency-range");
+const healthStatusEl = document.getElementById("health-status");
+const healthUpdatedEl = document.getElementById("health-updated");
+const storageUsageEl = document.getElementById("storage-usage");
+const storageFilesEl = document.getElementById("storage-files");
+const timeLimitInput = document.getElementById("time-limit-minutes");
+const timeLimitStartNow = document.getElementById("time-limit-start-now");
+const timeLimitApplyBtn = document.getElementById("time-limit-apply");
+const timeLimitClearBtn = document.getElementById("time-limit-clear");
+const noticeMessageInput = document.getElementById("notice-message");
+const noticeLevelSelect = document.getElementById("notice-level");
+const noticeSendBtn = document.getElementById("notice-send");
+const participantFilterSelect = document.getElementById("participant-filter");
+const participantSearchInput = document.getElementById("participant-search");
+const exportEventsBtn = document.getElementById("export-events");
+const logTailEl = document.getElementById("log-tail");
+
+let latestState = null;
+let participantFilter = "all";
+let participantSearch = "";
+let cachedClients = [];
+let timeLimitState = null;
+let timeLimitTickerId = null;
 
 async function fetchState() {
   try {
@@ -28,6 +54,8 @@ async function fetchState() {
 
 function renderState(state) {
   const clients = Array.isArray(state.clients) ? state.clients : [];
+  latestState = state;
+  cachedClients = clients;
   const usernames = Array.isArray(state.participant_usernames) ? state.participant_usernames : clients.map((client) => client.username);
   const participantCount = typeof state.participant_count === "number" ? state.participant_count : new Set(usernames).size;
   participantCountEl.textContent = participantCount;
@@ -36,15 +64,170 @@ function renderState(state) {
   chatCountEl.textContent = (state.chat_history || []).length;
   lastUpdatedEl.textContent = new Date(state.timestamp * 1000).toLocaleTimeString();
 
+  const shutdownRequested = Boolean(state.shutdown_requested);
+  if (shutdownButton) {
+    if (shutdownRequested) {
+      shutdownButton.disabled = true;
+      const label = typeof state.shutdown_reason === "string" && state.shutdown_reason
+        ? `Shutdown in progress: ${state.shutdown_reason}`
+        : "Shutdown in progress";
+      shutdownButton.textContent = label;
+      lastUpdatedEl.textContent = label;
+    } else if (shutdownButton.textContent !== "Requesting shutdown...") {
+      shutdownButton.disabled = false;
+      shutdownButton.textContent = shutdownLabel;
+    }
+  }
+
+  renderTimeLimit(state.time_limit);
+  renderLatencySummary(state.latency_summary);
+  renderHealthCard(state.health);
+  renderStorageUsage(state.storage_usage);
   renderParticipants(clients, presenter);
   renderChat(state.chat_history || []);
   renderEvents(state.events || []);
+  renderLogTail(state.log_tail || []);
   renderBannedList(state.banned_usernames || []);
+}
+
+function renderTimeLimit(info) {
+  if (!timeRemainingEl || !timeTotalEl) {
+    return;
+  }
+  if (timeLimitTickerId !== null) {
+    window.clearInterval(timeLimitTickerId);
+    timeLimitTickerId = null;
+  }
+  if (!info || !info.is_active) {
+    timeLimitState = null;
+    timeRemainingEl.textContent = "No limit";
+    timeRemainingEl.classList.remove("expired");
+    timeTotalEl.textContent = "Configure a limit to start countdown.";
+    if (timeLimitInput && document.activeElement !== timeLimitInput) {
+      timeLimitInput.value = "";
+    }
+    return;
+  }
+  timeLimitState = {
+    ...info,
+    _received_at: Date.now() / 1000,
+  };
+  updateTimeLimitDisplay();
+  timeLimitTickerId = window.setInterval(updateTimeLimitDisplay, 1000);
+  if (timeLimitInput && document.activeElement !== timeLimitInput) {
+    const durationSeconds = typeof info.duration_seconds === "number" ? info.duration_seconds : null;
+    timeLimitInput.value = durationSeconds ? String(Math.round(durationSeconds / 60)) : "";
+  }
+}
+
+function updateTimeLimitDisplay() {
+  if (!timeLimitState || !timeRemainingEl || !timeTotalEl) {
+    return;
+  }
+  const remainingSeconds = computeRemainingSeconds(timeLimitState);
+  if (remainingSeconds === null) {
+    timeRemainingEl.textContent = "--";
+    timeRemainingEl.classList.remove("expired");
+  } else if (remainingSeconds <= 0) {
+    timeRemainingEl.textContent = "Expired";
+    timeRemainingEl.classList.add("expired");
+  } else {
+    timeRemainingEl.textContent = formatCountdown(remainingSeconds);
+    timeRemainingEl.classList.toggle("expired", remainingSeconds <= 0);
+  }
+  const durationSeconds = typeof timeLimitState.duration_seconds === "number" ? timeLimitState.duration_seconds : null;
+  if (!durationSeconds) {
+    timeTotalEl.textContent = "Countdown in progress.";
+  } else {
+    timeTotalEl.textContent = `of ${formatCountdown(durationSeconds)}`;
+  }
+}
+
+function computeRemainingSeconds(state) {
+  const nowSeconds = Date.now() / 1000;
+  if (typeof state.end_timestamp === "number") {
+    return Math.max(0, Math.round(state.end_timestamp - nowSeconds));
+  }
+  if (typeof state.remaining_seconds === "number" && typeof state._received_at === "number") {
+    const elapsed = nowSeconds - state._received_at;
+    return Math.max(0, Math.round(state.remaining_seconds - elapsed));
+  }
+  if (typeof state.duration_seconds === "number" && typeof state.started_at === "number") {
+    const elapsed = nowSeconds - state.started_at;
+    return Math.max(0, Math.round(state.duration_seconds - elapsed));
+  }
+  return null;
+}
+
+function renderLatencySummary(summary) {
+  if (!latencyAverageEl || !latencyRangeEl) {
+    return;
+  }
+  if (!summary || typeof summary.sample_count !== "number" || summary.sample_count === 0) {
+    latencyAverageEl.textContent = "--";
+    latencyRangeEl.textContent = "No latency samples yet.";
+    return;
+  }
+  const average = Math.round(Number(summary.average_ms || 0));
+  const minValue = Math.round(Number(summary.min_ms || 0));
+  const maxValue = Math.round(Number(summary.max_ms || 0));
+  latencyAverageEl.textContent = `${average} ms`;
+  latencyRangeEl.textContent = `Min ${minValue} ms • Max ${maxValue} ms (${summary.sample_count} sample${summary.sample_count === 1 ? "" : "s"})`;
+}
+
+function renderHealthCard(health) {
+  if (!healthStatusEl || !healthUpdatedEl) {
+    return;
+  }
+  if (!health || typeof health !== "object") {
+    healthStatusEl.textContent = "UNKNOWN";
+    healthUpdatedEl.textContent = "—";
+    return;
+  }
+  const status = String(health.status || "unknown").toUpperCase();
+  healthStatusEl.textContent = status;
+  const updatedAt = typeof health.timestamp === "number" ? formatTimestamp(health.timestamp) : "—";
+  const participants = typeof health.participant_count === "number" ? ` • ${health.participant_count} participants` : "";
+  healthUpdatedEl.textContent = `Updated ${updatedAt}${participants}`;
+}
+
+function renderStorageUsage(usage) {
+  if (!storageUsageEl || !storageFilesEl) {
+    return;
+  }
+  if (!usage || typeof usage !== "object") {
+    storageUsageEl.textContent = "--";
+    storageFilesEl.textContent = "No storage metrics yet.";
+    return;
+  }
+  const bytes = Number(usage.bytes || 0);
+  const files = Number(usage.files || 0);
+  storageUsageEl.textContent = formatBytes(bytes);
+  storageFilesEl.textContent = `${files} file${files === 1 ? "" : "s"}`;
+}
+
+function renderLogTail(entries) {
+  if (!logTailEl) {
+    return;
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    logTailEl.textContent = "No recent log lines yet.";
+    return;
+  }
+  const lines = entries.slice(-40).map((entry) => {
+    const timestamp = formatTimestamp(entry.timestamp || Date.now() / 1000);
+    const level = typeof entry.level === "string" ? entry.level.toUpperCase() : "INFO";
+    const loggerName = entry.logger ? ` ${entry.logger}` : "";
+    const message = entry.message || "";
+    return `[${timestamp}] ${level}${loggerName} :: ${message}`;
+  });
+  logTailEl.textContent = lines.join("\n");
 }
 
 function renderParticipants(clients, presenter) {
   participantTable.innerHTML = "";
-  if (!clients.length) {
+  const dataset = Array.isArray(clients) ? clients.slice() : [];
+  if (!dataset.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 10;
@@ -55,7 +238,22 @@ function renderParticipants(clients, presenter) {
     return;
   }
 
-  clients
+  const filtered = dataset
+    .filter((client) => participantMatchesFilter(client))
+    .filter((client) => participantMatchesSearch(client));
+
+  if (!filtered.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 10;
+    cell.className = "placeholder";
+    cell.textContent = "No participants match the current filters.";
+    row.appendChild(cell);
+    participantTable.appendChild(row);
+    return;
+  }
+
+  filtered
     .slice()
     .sort((a, b) => a.username.localeCompare(b.username))
     .forEach((client) => {
@@ -118,6 +316,40 @@ function renderParticipants(clients, presenter) {
     });
 }
 
+function participantMatchesFilter(client) {
+  switch (participantFilter) {
+    case "presenters":
+      return Boolean(client.is_presenter);
+    case "hand":
+      return Boolean(client.hand_raised);
+    case "muted":
+      return client.audio_enabled === false;
+    case "noVideo":
+      return client.video_enabled === false;
+    case "highLatency": {
+      const latency = Number(client.latency_ms);
+      return Number.isFinite(latency) && latency >= 250;
+    }
+    case "inactive": {
+      const lastSeen = Number(client.last_seen_seconds);
+      return Number.isFinite(lastSeen) && lastSeen >= 30;
+    }
+    default:
+      return true;
+  }
+}
+
+function participantMatchesSearch(client) {
+  if (!participantSearch) {
+    return true;
+  }
+  const haystack = [client.username, client.peer_ip, client.peer_port, client.connection_type]
+    .filter((value) => value !== null && value !== undefined)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(participantSearch);
+}
+
 function renderChat(messages) {
   chatLogEl.innerHTML = "";
   if (!messages.length) {
@@ -177,6 +409,17 @@ function describeEvent(event) {
     }
     case "user_blocked":
       return `${details.username} attempted to join but is blocked.`;
+    case "time_limit_set":
+      {
+        const minutesRaw = details && details.duration_minutes !== undefined ? Number(details.duration_minutes) : NaN;
+        const minutes = Number.isFinite(minutesRaw) ? Math.round(minutesRaw) : null;
+        const label = minutes ? `${minutes} minute${minutes === 1 ? "" : "s"}` : "an unknown duration";
+        return `Time limit set to ${label} by ${details.actor || "admin"}.`;
+      }
+    case "time_limit_cleared":
+      return `Time limit cleared by ${details.actor || "admin"}.`;
+    case "admin_notice":
+      return `${details.actor || "admin"} broadcast: ${details.message || "(no message)"}`;
     default:
       return JSON.stringify(details);
   }
@@ -222,6 +465,25 @@ function formatDuration(seconds) {
   return `${Math.round(value / 3600)}h`;
 }
 
+function formatCountdown(totalSeconds) {
+  if (totalSeconds === null || totalSeconds === undefined || Number.isNaN(totalSeconds)) {
+    return "--";
+  }
+  const value = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const seconds = value % 60;
+  const pieces = [];
+  if (hours > 0) {
+    pieces.push(`${hours}h`);
+  }
+  if (minutes > 0 || hours > 0) {
+    pieces.push(`${minutes}m`);
+  }
+  pieces.push(`${seconds}s`);
+  return pieces.join(" ");
+}
+
 function makePlaceholder(text) {
   const item = document.createElement("li");
   item.className = "placeholder";
@@ -263,6 +525,40 @@ if (shutdownButton) {
   shutdownButton.addEventListener("click", handleShutdown);
 }
 
+if (timeLimitApplyBtn) {
+  timeLimitApplyBtn.addEventListener("click", handleTimeLimitApply);
+}
+
+if (timeLimitClearBtn) {
+  timeLimitClearBtn.addEventListener("click", handleTimeLimitClear);
+}
+
+if (noticeSendBtn) {
+  noticeSendBtn.addEventListener("click", handleNoticeSend);
+}
+
+if (participantFilterSelect) {
+  participantFilterSelect.addEventListener("change", () => {
+    participantFilter = participantFilterSelect.value;
+    if (cachedClients && latestState) {
+      renderParticipants(cachedClients, latestState.presenter || "");
+    }
+  });
+}
+
+if (participantSearchInput) {
+  participantSearchInput.addEventListener("input", () => {
+    participantSearch = participantSearchInput.value.trim().toLowerCase();
+    if (cachedClients && latestState) {
+      renderParticipants(cachedClients, latestState.presenter || "");
+    }
+  });
+}
+
+if (exportEventsBtn) {
+  exportEventsBtn.addEventListener("click", handleExportEvents);
+}
+
 async function handleShutdown() {
   if (!shutdownButton) {
     return;
@@ -274,14 +570,112 @@ async function handleShutdown() {
   shutdownButton.disabled = true;
   shutdownButton.textContent = "Requesting shutdown...";
   try {
-    await postJson("/api/actions/shutdown");
-    shutdownButton.textContent = "Shutdown requested";
-    lastUpdatedEl.textContent = "Shutdown requested";
+    const result = await postJson("/api/actions/shutdown");
+    const initiated = result && typeof result.initiated === "boolean" ? result.initiated : true;
+    const statusLabel = initiated ? "Shutdown requested" : "Shutdown already in progress";
+    shutdownButton.textContent = statusLabel;
+    lastUpdatedEl.textContent = statusLabel;
   } catch (error) {
     console.error("Failed to request shutdown", error);
     window.alert(error.message || "Failed to request shutdown");
     shutdownButton.disabled = false;
     shutdownButton.textContent = shutdownLabel;
+  }
+}
+
+async function handleTimeLimitApply() {
+  if (!timeLimitInput) {
+    return;
+  }
+  const rawValue = timeLimitInput.value.trim();
+  const minutes = Number(rawValue);
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    window.alert("Enter a positive duration in minutes before applying the limit.");
+    return;
+  }
+  const payload = {
+    duration_minutes: minutes,
+    start_now: timeLimitStartNow ? Boolean(timeLimitStartNow.checked) : false,
+  };
+  try {
+    const response = await postJson("/api/actions/time-limit", payload);
+    if (response && response.time_limit) {
+      renderTimeLimit(response.time_limit);
+    }
+    if (timeLimitStartNow) {
+      timeLimitStartNow.checked = false;
+    }
+  } catch (error) {
+    console.error("Failed to set time limit", error);
+    window.alert(error.message || "Failed to apply time limit");
+  }
+}
+
+async function handleTimeLimitClear() {
+  const confirmed = window.confirm("Clear the current meeting time limit?");
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const response = await postJson("/api/actions/time-limit", { duration_minutes: null });
+    if (response && response.time_limit) {
+      renderTimeLimit(response.time_limit);
+    } else {
+      renderTimeLimit(null);
+    }
+    if (timeLimitInput) {
+      timeLimitInput.value = "";
+    }
+    if (timeLimitStartNow) {
+      timeLimitStartNow.checked = false;
+    }
+  } catch (error) {
+    console.error("Failed to clear time limit", error);
+    window.alert(error.message || "Failed to clear time limit");
+  }
+}
+
+async function handleNoticeSend() {
+  if (!noticeMessageInput) {
+    return;
+  }
+  const message = noticeMessageInput.value.trim();
+  if (!message) {
+    window.alert("Enter a message to broadcast.");
+    return;
+  }
+  const payload = {
+    message,
+    level: noticeLevelSelect ? noticeLevelSelect.value : "info",
+  };
+  try {
+    await postJson("/api/actions/notice", payload);
+    noticeMessageInput.value = "";
+  } catch (error) {
+    console.error("Failed to send notice", error);
+    window.alert(error.message || "Failed to send notice");
+  }
+}
+
+async function handleExportEvents() {
+  try {
+    const response = await fetch("/api/export/events", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Request failed: ${response.status}`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    link.href = url;
+    link.download = `session-events-${timestamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error("Failed to export events", error);
+    window.alert(error.message || "Failed to export events");
   }
 }
 

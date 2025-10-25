@@ -33,6 +33,26 @@
           <div class="label">Chat messages</div>
           <div class="value" id="chat-count">0</div>
         </article>
+        <article class="card">
+          <div class="label">Time remaining</div>
+          <div class="value" id="time-remaining">No limit</div>
+          <div class="subtext" id="time-total">Configure a limit to start countdown.</div>
+        </article>
+        <article class="card">
+          <div class="label">Latency (avg)</div>
+          <div class="value" id="latency-average">--</div>
+          <div class="subtext" id="latency-range">No samples yet.</div>
+        </article>
+        <article class="card">
+          <div class="label">Server health</div>
+          <div class="value" id="health-status">Pending</div>
+          <div class="subtext" id="health-updated">—</div>
+        </article>
+        <article class="card">
+          <div class="label">Storage used</div>
+          <div class="value" id="storage-usage">--</div>
+          <div class="subtext" id="storage-files">Locating storage…</div>
+        </article>
       </section>
 
       <section class="panel">
@@ -42,6 +62,40 @@
         <div class="action-row">
           <button id="action-shutdown" class="action-button danger" type="button">Stop server &amp; clear files</button>
           <span class="action-hint">Triggers a graceful shutdown and purges temporary storage.</span>
+        </div>
+        <div class="control-grid">
+          <div class="control-card">
+            <h3>Meeting Time Limit</h3>
+            <p class="action-hint">Share a countdown banner with every client.</p>
+            <div class="form-row">
+              <label>
+                Duration (minutes)
+                <input type="number" id="time-limit-minutes" min="0" step="5" placeholder="45" />
+              </label>
+              <label class="checkbox">
+                <input type="checkbox" id="time-limit-start-now" />
+                <span>Restart timer from now</span>
+              </label>
+            </div>
+            <div class="form-row buttons">
+              <button id="time-limit-apply" class="action-button" type="button">Apply Limit</button>
+              <button id="time-limit-clear" class="action-button secondary" type="button">Clear Limit</button>
+            </div>
+          </div>
+          <div class="control-card">
+            <h3>Broadcast Notice</h3>
+            <p class="action-hint">Send a banner message to all participants immediately.</p>
+            <textarea id="notice-message" rows="3" placeholder="Maintenance starting in 5 minutes..."></textarea>
+            <div class="form-row buttons">
+              <select id="notice-level">
+                <option value="info">Info</option>
+                <option value="success">Success</option>
+                <option value="warning">Warning</option>
+                <option value="error">Alert</option>
+              </select>
+              <button id="notice-send" class="action-button" type="button">Send Notice</button>
+            </div>
+          </div>
         </div>
         <div class="banned-panel">
           <h3>Removed participants</h3>
@@ -54,6 +108,27 @@
         <header>
           <h2>Participants</h2>
         </header>
+        <div class="table-toolbar">
+          <div class="toolbar-inputs">
+            <label>
+              Filter
+              <select id="participant-filter">
+                <option value="all">All participants</option>
+                <option value="presenters">Presenters</option>
+                <option value="hand">Hands raised</option>
+                <option value="muted">Muted audio</option>
+                <option value="noVideo">Video off</option>
+                <option value="highLatency">High latency</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </label>
+            <label>
+              Search
+              <input type="search" id="participant-search" placeholder="Name, address, or port" />
+            </label>
+          </div>
+          <button id="export-events" class="action-button" type="button">Download Events</button>
+        </div>
         <table>
           <thead>
             <tr>
@@ -88,6 +163,13 @@
           </header>
           <ul class="timeline" id="event-log"></ul>
         </div>
+      </section>
+
+      <section class="panel">
+        <header>
+          <h2>Server Logs</h2>
+        </header>
+        <pre class="log-output" id="log-tail">No recent log lines yet.</pre>
       </section>
     </main>
 

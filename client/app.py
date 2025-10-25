@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import random
+import time
 import webbrowser
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 from fastapi import File, FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -31,7 +33,133 @@ from shared.resource_paths import project_root
 logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB limit
+RECONNECT_BASE_DELAY_SECONDS = 2.0
+RECONNECT_MAX_DELAY_SECONDS = 30.0
+LATENCY_SAMPLE_INTERVAL_SECONDS = 5.0
+TIME_LIMIT_LEAVE_REASON = "Meeting time limit reached"
 
+
+class _LatencyProbeProtocol(asyncio.DatagramProtocol):
+    def __init__(self, handler: Callable[[bytes], None]) -> None:
+        self._handler = handler
+
+    def datagram_received(self, data: bytes, addr) -> None:  # pragma: no cover - network callback
+        try:
+            self._handler(data)
+        except Exception:
+            logger.exception("Latency probe response handler failed")
+
+
+class LatencyProbe:
+    """Background helper to measure UDP round-trip latency to the server."""
+
+    def __init__(
+        self,
+        username: str,
+        server_host: str,
+        server_port: int,
+        *,
+        pre_shared_key: Optional[str] = None,
+    interval: float = LATENCY_SAMPLE_INTERVAL_SECONDS,
+        on_metrics: Optional[Callable[[float, Optional[float]], Awaitable[None] | None]] = None,
+    ) -> None:
+        self._username = username
+        self._server_host = server_host
+        self._server_port = server_port
+        self._pre_shared_key = pre_shared_key
+        self._interval = max(1.0, interval)
+        self._on_metrics = on_metrics
+        self._transport: Optional[asyncio.DatagramTransport] = None
+        self._task: Optional[asyncio.Task[None]] = None
+        self._running = False
+        self._sequence = 0
+        self._pending: Dict[int, float] = {}
+        self._previous_latency: Optional[float] = None
+
+    async def start(self) -> None:
+        if self._running:
+            return
+        loop = asyncio.get_running_loop()
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: _LatencyProbeProtocol(self._handle_packet),
+            local_addr=("0.0.0.0", 0),
+        )
+        self._transport = transport
+        self._running = True
+        self._task = asyncio.create_task(self._run())
+        logger.debug("Latency probe started for %s", self._username)
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:  # pragma: no cover - task cancellation
+                pass
+        self._task = None
+        if self._transport:
+            self._transport.close()
+            self._transport = None
+        self._pending.clear()
+        logger.debug("Latency probe stopped for %s", self._username)
+
+    async def _run(self) -> None:
+        try:
+            while self._running:
+                await self._send_probe()
+                await asyncio.sleep(self._interval)
+        except asyncio.CancelledError:  # pragma: no cover - task cancellation
+            return
+
+    async def _send_probe(self) -> None:
+        if not self._transport:
+            return
+        self._sequence = (self._sequence + 1) % (2**31)
+        timestamp_ms = int(time.time() * 1000)
+        payload = {
+            "username": self._username,
+            "timestamp_ms": timestamp_ms,
+            "sequence": self._sequence,
+        }
+        if self._pre_shared_key:
+            payload["pre_shared_key"] = self._pre_shared_key
+        message = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self._pending[self._sequence] = timestamp_ms
+        try:
+            self._transport.sendto(message, (self._server_host, self._server_port))
+        except Exception:
+            logger.exception("Failed to send latency probe")
+
+    def _handle_packet(self, data: bytes) -> None:
+        if not self._running:
+            return
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.debug("Ignoring malformed latency response")
+            return
+
+        sequence = payload.get("sequence")
+        if not isinstance(sequence, int):
+            return
+        sent_timestamp = self._pending.pop(sequence, None)
+        if sent_timestamp is None:
+            return
+        now_ms = int(time.time() * 1000)
+        latency_ms = max(0.0, float(now_ms - sent_timestamp))
+        jitter_ms: Optional[float] = None
+        if self._previous_latency is not None:
+            jitter_ms = abs(latency_ms - self._previous_latency)
+        self._previous_latency = latency_ms
+        if self._on_metrics is None:
+            return
+        try:
+            result = self._on_metrics(latency_ms, jitter_ms)
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+        except Exception:
+            logger.exception("Latency metrics callback failed")
 
 class WebSocketHub:
     """Tracks active UI WebSocket connections."""
@@ -63,7 +191,7 @@ class WebSocketHub:
 class ClientApp:
     """Client runtime orchestrating control plane and local web UI."""
 
-    def __init__(self, username: Optional[str], server_host: str, tcp_port: int = DEFAULT_TCP_PORT) -> None:
+    def __init__(self, username: Optional[str], server_host: str, tcp_port: int = DEFAULT_TCP_PORT, *, pre_shared_key: Optional[str] = None) -> None:
         self._prefill_username = username
         self._username: Optional[str] = None
         self._server_host = server_host
@@ -93,6 +221,20 @@ class ClientApp:
         self._connected = False
         self._uvicorn_server = None
         self._app = FastAPI()
+        self._pre_shared_key = pre_shared_key
+        self._presence: Dict[str, Dict[str, object]] = {}
+        self._latency_probe: Optional[LatencyProbe] = None
+        self._own_latency: Optional[Dict[str, float]] = None
+        self._should_reconnect = False
+        self._reconnect_task: Optional[asyncio.Task[None]] = None
+        self._reconnect_attempt = 0
+        self._reaction_log: List[Dict[str, object]] = []
+        self._local_hand_raised = False
+        self._latency_probe_port: Optional[int] = None
+        self._time_limit: Optional[Dict[str, object]] = None
+        self._admin_notices: List[Dict[str, object]] = []
+        self._time_limit_exit_triggered = False
+        self._time_limit_expiry_task: Optional[asyncio.Task[None]] = None
         self._configure_routes()
 
     def _configure_routes(self) -> None:
@@ -212,6 +354,106 @@ class ClientApp:
             }
             return StreamingResponse(iterator(), media_type="application/octet-stream", headers=headers)
 
+    def _normalize_presence_entry(self, raw: Dict[str, object]) -> Optional[Dict[str, object]]:
+        username = raw.get("username")
+        if not isinstance(username, str) or not username:
+            return None
+        entry: Dict[str, object] = {
+            "username": username,
+            "audio_enabled": bool(raw.get("audio_enabled", False)),
+            "video_enabled": bool(raw.get("video_enabled", False)),
+            "hand_raised": bool(raw.get("hand_raised", False)),
+            "is_typing": bool(raw.get("is_typing", False)),
+            "is_presenter": bool(raw.get("is_presenter", False)),
+            "last_seen_seconds": float(raw.get("last_seen_seconds", 0.0) or 0.0),
+        }
+        latency_val = raw.get("latency_ms")
+        jitter_val = raw.get("jitter_ms")
+        try:
+            entry["latency_ms"] = float(latency_val) if latency_val is not None else None
+        except (TypeError, ValueError):
+            entry["latency_ms"] = None
+        try:
+            entry["jitter_ms"] = float(jitter_val) if jitter_val is not None else None
+        except (TypeError, ValueError):
+            entry["jitter_ms"] = None
+        entry["is_self"] = username == self._username
+        return entry
+
+    def _normalize_time_limit(self, raw: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+        if not isinstance(raw, dict):
+            return None
+        status: Dict[str, object] = {
+            "is_active": bool(raw.get("is_active", False)),
+            "is_expired": bool(raw.get("is_expired", False)),
+        }
+        for field in ("duration_seconds", "remaining_seconds"):
+            value = raw.get(field)
+            if value is None:
+                status[field] = None
+            else:
+                try:
+                    status[field] = int(value)
+                except (TypeError, ValueError):
+                    status[field] = None
+        for field in ("end_timestamp", "started_at", "updated_at"):
+            value = raw.get(field)
+            if value is None:
+                status[field] = None
+            else:
+                try:
+                    status[field] = float(value)
+                except (TypeError, ValueError):
+                    status[field] = None
+        progress = raw.get("progress")
+        if progress is None:
+            status["progress"] = None
+        else:
+            try:
+                status["progress"] = max(0.0, min(1.0, float(progress)))
+            except (TypeError, ValueError):
+                status["progress"] = None
+        return status
+
+    def _normalize_admin_notice(self, raw: Dict[str, object]) -> Optional[Dict[str, object]]:
+        if not isinstance(raw, dict):
+            return None
+        message = str(raw.get("message", "")).strip()
+        if not message:
+            return None
+        notice: Dict[str, object] = {
+            "message": message,
+            "level": str(raw.get("level", "info")).lower(),
+            "actor": str(raw.get("actor", "admin")) or "admin",
+        }
+        timestamp = raw.get("timestamp")
+        try:
+            notice["timestamp"] = float(timestamp) if timestamp is not None else time.time()
+        except (TypeError, ValueError):
+            notice["timestamp"] = time.time()
+        return notice
+
+    def _presence_values(self) -> List[Dict[str, object]]:
+        return [dict(value) for value in self._presence.values()]
+
+    async def _broadcast_presence_sync(self) -> None:
+        await self._ws_hub.broadcast(
+            {
+                "type": "presence_sync",
+                "payload": {
+                    "participants": self._presence_values(),
+                },
+            }
+        )
+
+    async def _broadcast_presence_update(self, entry: Dict[str, object]) -> None:
+        await self._ws_hub.broadcast(
+            {
+                "type": "presence_update",
+                "payload": dict(entry),
+            }
+        )
+
     async def _determine_upload_size(self, upload: UploadFile) -> int:
         """Return the size in bytes of an incoming UploadFile without consuming it."""
         try:
@@ -246,6 +488,132 @@ class ClientApp:
         sanitized = "".join(safe_chars).strip()
         return sanitized or "download.bin"
 
+    async def _start_latency_probe(self) -> None:
+        if self._username is None:
+            await self._stop_latency_probe()
+            return
+        port_value = self._media_config.get("latency_port")
+        if not port_value:
+            await self._stop_latency_probe()
+            return
+        try:
+            port = int(port_value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid latency port %s", port_value)
+            await self._stop_latency_probe()
+            return
+        if self._latency_probe and self._latency_probe_port == port:
+            return
+        await self._stop_latency_probe()
+        probe = LatencyProbe(
+            username=self._username,
+            server_host=self._server_host,
+            server_port=port,
+            pre_shared_key=self._pre_shared_key,
+            on_metrics=self._on_latency_metrics,
+        )
+        try:
+            await probe.start()
+        except Exception:
+            logger.exception("Unable to start latency probe")
+            return
+        self._latency_probe = probe
+        self._latency_probe_port = port
+
+    async def _stop_latency_probe(self) -> None:
+        if self._latency_probe is None:
+            return
+        try:
+            await self._latency_probe.stop()
+        finally:
+            self._latency_probe = None
+            self._latency_probe_port = None
+            self._own_latency = None
+
+    async def _on_latency_metrics(self, latency_ms: float, jitter_ms: Optional[float]) -> None:
+        self._own_latency = {
+            "latency_ms": latency_ms,
+            "jitter_ms": jitter_ms if jitter_ms is not None else None,
+        }
+        if self._username:
+            entry = self._presence.get(self._username)
+            if entry is not None:
+                entry["latency_ms"] = latency_ms
+                entry["jitter_ms"] = jitter_ms
+                await self._broadcast_presence_update(entry)
+        await self._ws_hub.broadcast(
+            {
+                "type": "latency_metrics",
+                "payload": {
+                    "latency_ms": latency_ms,
+                    "jitter_ms": jitter_ms,
+                },
+            }
+        )
+        if self._client and self._connected:
+            try:
+                await self._client.send_latency_update(latency_ms, jitter_ms)
+            except Exception:
+                logger.debug("Latency update send failed", exc_info=True)
+
+    def _cancel_reconnect(self) -> None:
+        if self._reconnect_task is None:
+            return
+        task = self._reconnect_task
+        self._reconnect_task = None
+        task.cancel()
+
+    def _schedule_reconnect(self, *, immediate: bool = False) -> None:
+        if not self._should_reconnect:
+            return
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        delay = 0.0 if immediate else min(
+            RECONNECT_BASE_DELAY_SECONDS * (2 ** self._reconnect_attempt),
+            RECONNECT_MAX_DELAY_SECONDS,
+        )
+        self._reconnect_attempt += 1
+
+        async def _worker(delay_seconds: float) -> None:
+            try:
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                if not self._should_reconnect:
+                    return
+                username = self._username or self._prefill_username
+                if not username:
+                    logger.info("Reconnect aborted; no username set")
+                    return
+                await self._start_session(username)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Reconnect attempt failed")
+                if self._should_reconnect:
+                    self._schedule_reconnect()
+            finally:
+                self._reconnect_task = None
+
+        self._reconnect_task = asyncio.create_task(_worker(delay))
+
+    async def _on_control_disconnect(self, reason: Optional[str]) -> None:
+        if not self._should_reconnect:
+            return
+        if reason:
+            logger.warning("Control connection lost: %s", reason)
+        else:
+            logger.warning("Control connection lost")
+        self._connected = False
+        await self._stop_latency_probe()
+        self._cancel_time_limit_watch()
+        self._time_limit_exit_triggered = False
+        await self._broadcast_session_status(
+            "reconnecting",
+            username=self._username,
+            message=reason,
+        )
+        self._schedule_reconnect()
+
     def _generate_username(self) -> str:
         adjectives = [
             "swift",
@@ -276,9 +644,15 @@ class ClientApp:
             )
             return
         await self._broadcast_session_status("connecting", username=username)
+        self._should_reconnect = True
+        self._cancel_reconnect()
+        await self._stop_latency_probe()
         await self._stop_media_clients()
         if self._client:
             await self._client.close()
+        self._cancel_time_limit_watch()
+        self._time_limit_exit_triggered = False
+        self._time_limit = None
         self._username = username
         self._prefill_username = username
         self._connected = False
@@ -287,6 +661,8 @@ class ClientApp:
             port=self._tcp_port,
             username=username,
             on_message=self._handle_control_message,
+            pre_shared_key=self._pre_shared_key,
+            on_disconnect=self._on_control_disconnect,
         )
         self._file_client = FileClient(host=self._server_host, port=self._media_config["file_port"], username=username)
         self._screen_publisher = ScreenPublisher(
@@ -297,16 +673,32 @@ class ClientApp:
         self._audio_enabled = False
         self._video_enabled = False
         self._screen_requested = False
+        self._local_hand_raised = False
         self._peer_media = {
             username: {
                 "audio_enabled": self._audio_enabled,
                 "video_enabled": self._video_enabled,
             }
         }
+        self._presence[username] = {
+            "username": username,
+            "audio_enabled": self._audio_enabled,
+            "video_enabled": self._video_enabled,
+            "hand_raised": self._local_hand_raised,
+            "is_typing": False,
+            "is_presenter": False,
+            "latency_ms": None,
+            "jitter_ms": None,
+            "last_seen_seconds": 0.0,
+            "is_self": True,
+        }
+        await self._broadcast_presence_update(self._presence[username])
         try:
             await self._client.connect()
             self._connected = True
+            self._reconnect_attempt = 0
             await self._broadcast_session_status("connected", username=username)
+            await self._start_latency_probe()
         except Exception as exc:
             if self._kicked:
                 await self._stop_media_clients()
@@ -326,7 +718,8 @@ class ClientApp:
             self._screen_publisher = None
             self._username = None
             self._connected = False
-            raise
+            self._schedule_reconnect()
+            return
 
     async def _stop_media_clients(self) -> None:
         tasks: List[asyncio.Future[None]] = []
@@ -343,6 +736,7 @@ class ClientApp:
         self._screen_publisher = None
         self._screen_requested = False
         self._peer_media = {}
+        await self._stop_latency_probe()
 
     async def _stop_ui_server(self) -> None:
         server = self._uvicorn_server
@@ -384,7 +778,87 @@ class ClientApp:
             "peer_media": {
                 peer: dict(state) for peer, state in self._peer_media.items()
             },
+            "presence": self._presence_values(),
+            "latency": dict(self._own_latency) if self._own_latency else None,
+            "hand_raised": self._local_hand_raised,
+            "reactions": [dict(item) for item in self._reaction_log[-50:]],
+            "time_limit": dict(self._time_limit) if self._time_limit else None,
+            "admin_notices": [dict(item) for item in self._admin_notices[-20:]],
         }
+
+    def _cancel_time_limit_watch(self) -> None:
+        task = self._time_limit_expiry_task
+        if task is None:
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is current:
+            self._time_limit_expiry_task = None
+            return
+        if not task.done():
+            task.cancel()
+        self._time_limit_expiry_task = None
+
+    def _compute_time_limit_delay(self, status: Optional[Dict[str, object]]) -> Optional[float]:
+        if not status or not status.get("is_active"):
+            return None
+        now = time.time()
+        end_ts = status.get("end_timestamp")
+        if isinstance(end_ts, (int, float)):
+            return max(0.0, float(end_ts) - now)
+        remaining = status.get("remaining_seconds")
+        if isinstance(remaining, (int, float)):
+            return max(0.0, float(remaining))
+        duration = status.get("duration_seconds")
+        started_at = status.get("started_at")
+        if isinstance(duration, (int, float)) and isinstance(started_at, (int, float)):
+            return max(0.0, float(started_at + duration - now))
+        return None
+
+    def _schedule_time_limit_watch(self, status: Optional[Dict[str, object]]) -> None:
+        self._cancel_time_limit_watch()
+        if not status or not status.get("is_active"):
+            self._time_limit_exit_triggered = False
+            return
+        delay = self._compute_time_limit_delay(status)
+        is_expired = bool(status.get("is_expired"))
+        if is_expired or (delay is not None and delay <= 0.0):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            task = loop.create_task(self._handle_time_limit_expired())
+            task.add_done_callback(lambda _: setattr(self, "_time_limit_expiry_task", None))
+            self._time_limit_expiry_task = task
+            return
+        if delay is None:
+            return
+        self._time_limit_exit_triggered = False
+
+        async def _wait_and_leave() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self._handle_time_limit_expired()
+            except asyncio.CancelledError:
+                return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(_wait_and_leave())
+        task.add_done_callback(lambda _: setattr(self, "_time_limit_expiry_task", None))
+        self._time_limit_expiry_task = task
+
+    async def _handle_time_limit_expired(self) -> None:
+        if self._time_limit_exit_triggered:
+            return
+        self._time_limit_exit_triggered = True
+        if not self._connected and not self._client:
+            return
+        await self._leave_session(reason=TIME_LIMIT_LEAVE_REASON)
 
     def _set_audio_enabled(self, enabled: bool) -> None:
         self._audio_enabled = enabled
@@ -417,6 +891,13 @@ class ClientApp:
             entry["audio_enabled"] = audio_enabled
         if video_enabled is not None:
             entry["video_enabled"] = video_enabled
+        presence_entry = self._presence.get(self._username)
+        if presence_entry is not None:
+            if audio_enabled is not None:
+                presence_entry["audio_enabled"] = audio_enabled
+            if video_enabled is not None:
+                presence_entry["video_enabled"] = video_enabled
+            asyncio.create_task(self._broadcast_presence_update(presence_entry))
 
     async def run(self, host: str = "127.0.0.1", port: int = 8100) -> None:
         import uvicorn
@@ -499,6 +980,47 @@ class ClientApp:
                             "video_enabled": False,
                         },
                     )
+            presence_items = payload.get("presence") or []
+            if isinstance(presence_items, list):
+                self._presence.clear()
+                for item in presence_items:
+                    if isinstance(item, dict):
+                        normalized = self._normalize_presence_entry(item)
+                        if normalized:
+                            self._presence[normalized["username"]] = normalized
+            time_limit_payload = self._normalize_time_limit(payload.get("time_limit"))
+            self._time_limit = time_limit_payload
+            payload["time_limit"] = time_limit_payload
+            self._schedule_time_limit_watch(time_limit_payload)
+            if self._admin_notices:
+                payload["admin_notices"] = [dict(item) for item in self._admin_notices[-10:]]
+            if self._username:
+                entry = self._presence.get(self._username)
+                if entry is None:
+                    entry = self._normalize_presence_entry({"username": self._username}) or {
+                        "username": self._username,
+                        "audio_enabled": self._audio_enabled,
+                        "video_enabled": self._video_enabled,
+                        "hand_raised": self._local_hand_raised,
+                        "is_typing": False,
+                        "is_presenter": False,
+                        "latency_ms": None,
+                        "jitter_ms": None,
+                        "last_seen_seconds": 0.0,
+                        "is_self": True,
+                    }
+                    self._presence[self._username] = entry
+                entry["audio_enabled"] = self._audio_enabled
+                entry["video_enabled"] = self._video_enabled
+                entry["hand_raised"] = self._local_hand_raised
+                entry["is_self"] = True
+                if entry.get("latency_ms") is not None:
+                    self._own_latency = {
+                        "latency_ms": float(entry["latency_ms"]),
+                        "jitter_ms": entry.get("jitter_ms"),
+                    }
+            await self._broadcast_presence_sync()
+            await self._start_latency_probe()
         elif action == ControlAction.USER_JOINED:
             username = payload.get("username")
             participants = payload.get("participants")
@@ -545,6 +1067,8 @@ class ClientApp:
                 )
             if isinstance(username, str):
                 self._peer_media.pop(username, None)
+                self._presence.pop(username, None)
+                await self._broadcast_presence_sync()
         elif action == ControlAction.CHAT_MESSAGE:
             message = {
                 "sender": payload.get("sender"),
@@ -593,6 +1117,10 @@ class ClientApp:
                     entry["audio_enabled"] = bool(payload.get("audio_enabled"))
                 if username == self._username and "audio_enabled" in payload:
                     self._audio_enabled = bool(payload.get("audio_enabled"))
+                presence_entry = self._presence.get(username)
+                if presence_entry is not None and "audio_enabled" in payload:
+                    presence_entry["audio_enabled"] = bool(payload.get("audio_enabled"))
+                    await self._broadcast_presence_update(presence_entry)
         elif action == ControlAction.KICKED:
             reason = str(payload.get("reason") or "An administrator removed you from this meeting.")
             self._kicked = True
@@ -609,8 +1137,85 @@ class ClientApp:
             self._file_catalog.clear()
             self._peer_media.clear()
             self._presenter = None
+            self._cancel_time_limit_watch()
+            self._time_limit_exit_triggered = False
+            self._time_limit = None
             await self._broadcast_session_status("kicked", message=reason)
             await self._stop_ui_server()
+        elif action == ControlAction.PRESENCE_SYNC:
+            participants = payload.get("participants")
+            if isinstance(participants, list):
+                self._presence.clear()
+                for item in participants:
+                    if isinstance(item, dict):
+                        normalized = self._normalize_presence_entry(item)
+                        if normalized:
+                            self._presence[normalized["username"]] = normalized
+                await self._broadcast_presence_sync()
+        elif action == ControlAction.PRESENCE_UPDATE:
+            normalized = self._normalize_presence_entry(payload)
+            if normalized:
+                self._presence[normalized["username"]] = normalized
+                if normalized["username"] == self._username:
+                    self._local_hand_raised = bool(normalized.get("hand_raised", False))
+                    latency_ms = normalized.get("latency_ms")
+                    if latency_ms is not None:
+                        self._own_latency = {
+                            "latency_ms": float(latency_ms),
+                            "jitter_ms": normalized.get("jitter_ms"),
+                        }
+                await self._broadcast_presence_update(normalized)
+        elif action == ControlAction.TYPING_STATUS:
+            username = payload.get("username")
+            is_typing = bool(payload.get("is_typing", False))
+            entry = self._presence.get(username) if isinstance(username, str) else None
+            if entry is not None:
+                entry["is_typing"] = is_typing
+                await self._broadcast_presence_update(entry)
+        elif action == ControlAction.HAND_STATUS:
+            username = payload.get("username")
+            hand_raised = bool(payload.get("hand_raised", False))
+            entry = self._presence.get(username) if isinstance(username, str) else None
+            if entry is not None:
+                entry["hand_raised"] = hand_raised
+                if username == self._username:
+                    self._local_hand_raised = hand_raised
+                await self._broadcast_presence_update(entry)
+        elif action == ControlAction.REACTION:
+            reaction = {
+                "username": payload.get("username"),
+                "reaction": payload.get("reaction"),
+                "timestamp_ms": payload.get("timestamp_ms"),
+            }
+            self._reaction_log.append(reaction)
+            if len(self._reaction_log) > 200:
+                self._reaction_log.pop(0)
+        elif action == ControlAction.LATENCY_UPDATE:
+            username = payload.get("username")
+            entry = self._presence.get(username) if isinstance(username, str) else None
+            if entry is not None:
+                entry["latency_ms"] = payload.get("latency_ms")
+                entry["jitter_ms"] = payload.get("jitter_ms")
+                if username == self._username:
+                    self._own_latency = {
+                        "latency_ms": payload.get("latency_ms"),
+                        "jitter_ms": payload.get("jitter_ms"),
+                    }
+                await self._broadcast_presence_update(entry)
+        elif action == ControlAction.TIME_LIMIT_UPDATE:
+            normalized = self._normalize_time_limit(payload)
+            self._time_limit = normalized
+            payload = normalized or {}
+            self._schedule_time_limit_watch(normalized)
+        elif action == ControlAction.ADMIN_NOTICE:
+            notice = self._normalize_admin_notice(payload)
+            if notice:
+                self._admin_notices.append(notice)
+                if len(self._admin_notices) > 100:
+                    self._admin_notices = self._admin_notices[-100:]
+                payload = notice
+            else:
+                payload = {}
 
         await self._ws_hub.broadcast(
             {
@@ -679,6 +1284,44 @@ class ClientApp:
             enabled = bool(payload.get("enabled", False))
             self._set_video_enabled(enabled)
             await self._client.send(ControlAction.VIDEO_STATUS, {"video_enabled": enabled})
+        elif kind == "typing":
+            if not self._client or self._username is None:
+                return
+            is_typing = bool(payload.get("is_typing", False))
+            await self._client.send_typing(is_typing)
+            entry = self._presence.get(self._username)
+            if entry is not None:
+                entry["is_typing"] = is_typing
+                asyncio.create_task(self._broadcast_presence_update(entry))
+        elif kind == "toggle_hand":
+            if not self._client or self._username is None:
+                return
+            desired = bool(payload.get("hand_raised", False))
+            self._local_hand_raised = desired
+            await self._client.send_hand_status(desired)
+            entry = self._presence.get(self._username)
+            if entry is not None:
+                entry["hand_raised"] = desired
+                asyncio.create_task(self._broadcast_presence_update(entry))
+        elif kind == "send_reaction":
+            if not self._client:
+                return
+            reaction = str(payload.get("reaction", "")).strip()
+            if not reaction:
+                return
+            await self._client.send_reaction(reaction)
+        elif kind == "copy_file_link":
+            file_id = payload.get("file_id")
+            if isinstance(file_id, str) and file_id:
+                await self._ws_hub.broadcast(
+                    {
+                        "type": "file_share_link",
+                        "payload": {
+                            "file_id": file_id,
+                            "url": f"/api/files/download/{file_id}",
+                        },
+                    }
+                )
         elif kind == "toggle_presentation":
             desired = bool(payload.get("enabled", False))
             if not self._client:
@@ -690,7 +1333,11 @@ class ClientApp:
                 await self._client.send(ControlAction.PRESENTER_REVOKED, {})
                 self._screen_requested = False
         elif kind == "leave_session":
-            await self._leave_session(reason="auto" if payload.get("auto") else None)
+            reason = payload.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                await self._leave_session(reason=reason.strip())
+            else:
+                await self._leave_session(reason=TIME_LIMIT_LEAVE_REASON if payload.get("auto") else None)
         elif kind == "heartbeat":
             # UI-level heartbeat - ignore for now.
             return
@@ -704,9 +1351,14 @@ class ClientApp:
             return
 
         username = self._username
+        self._should_reconnect = False
+        self._cancel_reconnect()
+        self._cancel_time_limit_watch()
+        self._time_limit_exit_triggered = False
         await self._broadcast_session_status("disconnecting", username=username, message=reason)
 
         await self._stop_media_clients()
+        await self._stop_latency_probe()
 
         if self._client:
             try:
@@ -728,6 +1380,11 @@ class ClientApp:
         self._chat_history = []
         self._file_catalog = {}
         self._presenter = None
+        self._presence.clear()
+        self._reaction_log.clear()
+        self._own_latency = None
+        self._local_hand_raised = False
+        self._time_limit = None
 
         if username:
             self._prefill_username = username
@@ -746,7 +1403,7 @@ class ClientApp:
         if self._username is None:
             return
         changed = False
-        for key in ("video_port", "audio_port", "screen_port", "file_port"):
+        for key in ("video_port", "audio_port", "screen_port", "file_port", "latency_port"):
             if key in media and media[key] != self._media_config.get(key):
                 self._media_config[key] = media[key]
                 changed = True
@@ -800,6 +1457,8 @@ class ClientApp:
             except Exception:  # pragma: no cover - hardware dependent
                 logger.exception("Unable to start audio client")
                 self._audio_client = None
+
+        await self._start_latency_probe()
 
     async def _handle_video_frame(self, username: str, frame_b64: str) -> None:
         await self._ws_hub.broadcast(

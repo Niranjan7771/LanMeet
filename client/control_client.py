@@ -6,18 +6,12 @@ import time
 from collections import deque
 from typing import Awaitable, Callable, Deque, Dict, Optional
 
-from shared.protocol import (
-    ChatMessage,
-    ClientIdentity,
-    ControlAction,
-    decode_control_stream,
-    encode_control_message,
-)
+from shared.protocol import ClientIdentity, ControlAction, decode_control_stream, encode_control_message
 
 logger = logging.getLogger(__name__)
 
-HeartbeatCallback = Callable[[None], None]
 MessageCallback = Callable[[ControlAction, dict], Awaitable[None] | None]
+DisconnectCallback = Callable[[Optional[str]], Awaitable[None] | None]
 
 
 class ControlClient:
@@ -29,6 +23,9 @@ class ControlClient:
         port: int,
         username: str,
         on_message: MessageCallback,
+        *,
+        pre_shared_key: Optional[str] = None,
+        on_disconnect: Optional[DisconnectCallback] = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -42,13 +39,15 @@ class ControlClient:
         self._send_event = asyncio.Event()
         self._connected = asyncio.Event()
         self._stop = False
+        self._pre_shared_key = pre_shared_key
+        self._on_disconnect = on_disconnect
 
     async def connect(self) -> None:
         logger.info("Connecting to server %s:%s", self._host, self._port)
         self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
         hello = encode_control_message(
             ControlAction.HELLO,
-            ClientIdentity(username=self._username).to_dict(),
+            ClientIdentity(username=self._username, pre_shared_key=self._pre_shared_key).to_dict(),
         )
         await self._send_raw(hello)
         asyncio.create_task(self._send_loop())
@@ -70,6 +69,19 @@ class ControlClient:
                 await self._writer.wait_closed()
             except Exception:
                 pass
+        self._reader = None
+        self._writer = None
+        self._connected.clear()
+
+    async def _notify_disconnect(self, reason: Optional[str]) -> None:
+        if self._on_disconnect is None:
+            return
+        try:
+            result = self._on_disconnect(reason)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("Disconnect callback failed")
 
     async def _send_raw(self, data: bytes) -> None:
         if not self._writer:
@@ -90,6 +102,42 @@ class ControlClient:
             },
         )
 
+    async def send_typing(self, is_typing: bool) -> None:
+        await self.send(
+            ControlAction.TYPING_STATUS,
+            {
+                "is_typing": is_typing,
+                "timestamp_ms": int(time.time() * 1000),
+            },
+        )
+
+    async def send_hand_status(self, hand_raised: bool) -> None:
+        await self.send(
+            ControlAction.HAND_STATUS,
+            {
+                "hand_raised": hand_raised,
+                "timestamp_ms": int(time.time() * 1000),
+            },
+        )
+
+    async def send_reaction(self, reaction: str) -> None:
+        await self.send(
+            ControlAction.REACTION,
+            {
+                "reaction": reaction,
+                "timestamp_ms": int(time.time() * 1000),
+            },
+        )
+
+    async def send_latency_update(self, latency_ms: float, jitter_ms: Optional[float] = None) -> None:
+        payload: Dict[str, object] = {
+            "latency_ms": float(latency_ms),
+            "timestamp_ms": int(time.time() * 1000),
+        }
+        if jitter_ms is not None:
+            payload["jitter_ms"] = float(jitter_ms)
+        await self.send(ControlAction.LATENCY_UPDATE, payload)
+
     async def _send_loop(self) -> None:
         while not self._stop:
             await self._send_event.wait()
@@ -106,11 +154,13 @@ class ControlClient:
     async def _recv_loop(self) -> None:
         assert self._reader is not None
         reader = self._reader
+        disconnect_reason: Optional[str] = None
         try:
             while not self._stop:
                 chunk = await reader.read(4096)
                 if not chunk:
                     logger.info("Server closed control connection")
+                    disconnect_reason = "server_closed"
                     break
                 self._buffer.extend(chunk)
                 messages, remaining = decode_control_stream(bytes(self._buffer))
@@ -121,10 +171,14 @@ class ControlClient:
                     if action == ControlAction.WELCOME:
                         self._connected.set()
                     asyncio.create_task(self._dispatch(action, payload))
+        except Exception:
+            logger.exception("Error while receiving from control server")
+            disconnect_reason = "recv_error"
         finally:
             if not self._connected.is_set():
                 self._connected.set()
             await self.close()
+            await self._notify_disconnect(disconnect_reason or "connection_closed")
 
     async def _dispatch(self, action: ControlAction, payload: dict) -> None:
         try:

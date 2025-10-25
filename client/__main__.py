@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--ui-host", default="127.0.0.1", help="Host to bind the local UI web server")
     parser.add_argument("--ui-port", type=int, default=8100, help="Port for the local UI web server")
     parser.add_argument("--username", help="Optional display name to pre-fill in the UI")
+    parser.add_argument("--pre-shared-key", help="Optional pre-shared key required by the server")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -39,7 +40,12 @@ def main() -> None:
         print("A server hostname or IP is required to start the client.")
         return
 
-    app = ClientApp(username=args.username, server_host=server_host, tcp_port=args.tcp_port)
+    app = ClientApp(
+        username=args.username,
+        server_host=server_host,
+        tcp_port=args.tcp_port,
+        pre_shared_key=args.pre_shared_key,
+    )
 
     try:
         asyncio.run(app.run(host=args.ui_host, port=args.ui_port))

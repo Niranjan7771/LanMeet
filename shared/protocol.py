@@ -41,6 +41,14 @@ class ControlAction(str, Enum):
     FILE_PROGRESS = "file_progress"
     VIDEO_STATUS = "video_status"
     AUDIO_STATUS = "audio_status"
+    PRESENCE_SYNC = "presence_sync"
+    PRESENCE_UPDATE = "presence_update"
+    TYPING_STATUS = "typing_status"
+    REACTION = "reaction"
+    HAND_STATUS = "hand_status"
+    LATENCY_UPDATE = "latency_update"
+    TIME_LIMIT_UPDATE = "time_limit_update"
+    ADMIN_NOTICE = "admin_notice"
     ERROR = "error"
     KICKED = "kicked"
 
@@ -183,6 +191,7 @@ DEFAULT_VIDEO_PORT = 56000
 DEFAULT_AUDIO_PORT = 56010
 DEFAULT_SCREEN_PORT = 55010
 DEFAULT_FILE_PORT = 55020
+DEFAULT_LATENCY_PORT = 56030
 
 
 @dataclass(slots=True)
@@ -218,6 +227,7 @@ class ClientIdentity:
 
     username: str
     client_version: str = "0.1.0"
+    pre_shared_key: Optional[str] = None
     desired_room: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -225,6 +235,8 @@ class ClientIdentity:
             "username": self.username,
             "client_version": self.client_version,
         }
+        if self.pre_shared_key is not None:
+            data["pre_shared_key"] = self.pre_shared_key
         if self.desired_room:
             data["desired_room"] = self.desired_room
         return data
@@ -234,5 +246,6 @@ class ClientIdentity:
         return cls(
             username=data["username"],
             client_version=data.get("client_version", "0.1.0"),
+            pre_shared_key=data.get("pre_shared_key"),
             desired_room=data.get("desired_room"),
         )

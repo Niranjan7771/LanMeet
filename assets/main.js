@@ -12,6 +12,18 @@ const screenStatusEl = document.getElementById("screen-status");
 const screenImageEl = document.getElementById("screen-image");
 const videoGridEl = document.getElementById("video-grid");
 const participantCountDisplay = document.getElementById("participant-count-display");
+const typingIndicatorEl = document.getElementById("typing-indicator");
+const latencyBadgeEl = document.getElementById("latency-badge");
+const meetingTimerEl = document.getElementById("meeting-timer");
+const reactionsBtn = document.getElementById("reactions-btn");
+const reactionPicker = document.getElementById("reaction-picker");
+const reactionOptions = reactionPicker ? Array.from(reactionPicker.querySelectorAll(".reaction-option")) : [];
+const reactionStreamEl = document.getElementById("reaction-stream");
+const dragOverlay = document.getElementById("drag-overlay");
+const chatTabContent = document.getElementById("chat-tab");
+const filesTabContent = document.getElementById("files-tab");
+const chatTabBtn = document.querySelector('.tab-btn[data-tab="chat"]');
+const filesTabBtn = document.querySelector('.tab-btn[data-tab="files"]');
 
 // Sidebar elements
 const participantsSidebar = document.getElementById("participants-sidebar");
@@ -25,6 +37,7 @@ const closeChatBtn = document.getElementById("close-chat-btn");
 const tabBtns = document.querySelectorAll(".tab-btn");
 const tabContents = document.querySelectorAll(".tab-content");
 
+const TIME_LIMIT_LEAVE_REASON = "Meeting time limit reached";
 const VIDEO_PLACEHOLDER_TEXT = "Waiting for participants...";
 const VIDEO_IDLE_TIMEOUT_MS = 4000;
 const VIDEO_STALE_CHECK_INTERVAL_MS = 1500;
@@ -42,6 +55,7 @@ const joinButton = joinForm.querySelector(".primary");
 const micToggleBtn = document.getElementById("toggle-mic");
 const videoToggleBtn = document.getElementById("toggle-video");
 const presentToggleBtn = document.getElementById("toggle-present");
+const handToggleBtn = document.getElementById("toggle-hand");
 const leaveButton = document.getElementById("leave-session");
 const leaveCountdownEl = document.getElementById("leave-countdown");
 const leaveSection = document.getElementById("leave-confirm");
@@ -50,6 +64,7 @@ const cancelLeaveBtn = document.getElementById("cancel-leave");
 const confirmLeaveBtn = document.getElementById("confirm-leave");
 const kickedNotice = document.getElementById("kicked-notice");
 const kickedMessageEl = document.getElementById("kicked-message");
+const adminBannerEl = document.getElementById("admin-banner");
 
 let socket;
 let socketReady = false;
@@ -67,6 +82,44 @@ let leaveDeadlineMs = null;
 const LEAVE_GRACE_PERIOD_MS = 20000;
 let wasKicked = false;
 let kickedReason = "";
+
+let presenceMap = new Map();
+let localHandRaised = false;
+let lastLatencyMetrics = null;
+let typingActive = false;
+let typingDebounceId = null;
+let typingResetId = null;
+let reactionMenuOpen = false;
+const pendingDownloads = new Set();
+const pendingShareLinks = new Set();
+let dragDepthCounter = 0;
+let meetingTimerState = null;
+let meetingTimerIntervalId = null;
+let meetingTimerAutoLeaveTriggered = false;
+let adminBannerTimeoutId = null;
+let statusRestoreTimerId = null;
+let persistentStatus = {
+  text: statusEl ? statusEl.textContent || "" : "",
+  severity: statusEl && statusEl.classList.contains("error")
+    ? "error"
+    : statusEl && statusEl.classList.contains("warning")
+    ? "warning"
+    : "info",
+};
+let suppressChatNotifications = false;
+let suppressFileNotifications = false;
+let chatUnreadCount = 0;
+let filesUnreadCount = 0;
+let chatToggleBadgeEl = null;
+let chatTabBadgeEl = null;
+let filesTabBadgeEl = null;
+
+const TYPING_DEBOUNCE_MS = 250;
+const TYPING_IDLE_TIMEOUT_MS = 3500;
+const LATENCY_GOOD_MS = 120;
+const LATENCY_WARN_MS = 250;
+const REACTION_REPLAY_LIMIT = 5;
+const MAX_REACTION_STREAM_ITEMS = 6;
 
 const avatarStyleCache = new Map();
 const peerMedia = new Map();
@@ -110,6 +163,669 @@ function createAvatarElement(username) {
   return avatar;
 }
 
+function createParticipantAvatar(username) {
+  const avatar = document.createElement("div");
+  avatar.className = "participant-avatar";
+  avatar.textContent = getAvatarInitial(username);
+  avatar.style.background = getAvatarGradient(username);
+  avatar.setAttribute("aria-hidden", "true");
+  return avatar;
+}
+
+function normalizePresenceEntry(raw, options = {}) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const username = typeof raw.username === "string" ? raw.username.trim() : "";
+  if (!username) {
+    return null;
+  }
+  const partial = Boolean(options.partial);
+  const coerceNumber = (value) => {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+  const entry = { username };
+  const booleanKeys = ["audio_enabled", "video_enabled", "hand_raised", "is_typing", "is_presenter"];
+  booleanKeys.forEach((key) => {
+    if (partial) {
+      if (Object.prototype.hasOwnProperty.call(raw, key)) {
+        entry[key] = Boolean(raw[key]);
+      }
+    } else {
+      entry[key] = Boolean(raw[key]);
+    }
+  });
+  if (partial) {
+    if (Object.prototype.hasOwnProperty.call(raw, "last_seen_seconds")) {
+      entry.last_seen_seconds = coerceNumber(raw.last_seen_seconds) ?? 0;
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, "latency_ms")) {
+      entry.latency_ms = coerceNumber(raw.latency_ms);
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, "jitter_ms")) {
+      entry.jitter_ms = coerceNumber(raw.jitter_ms);
+    }
+  } else {
+    entry.last_seen_seconds = coerceNumber(raw.last_seen_seconds) ?? 0;
+    entry.latency_ms = coerceNumber(raw.latency_ms);
+    entry.jitter_ms = coerceNumber(raw.jitter_ms);
+  }
+  return entry;
+}
+
+function refreshPresenceUi() {
+  renderParticipants();
+  updateParticipantSummary();
+  updateTypingIndicator();
+}
+
+function applyPresenceSnapshot(entries) {
+  if (!Array.isArray(entries)) {
+    presenceMap = new Map();
+    refreshPresenceUi();
+    return;
+  }
+  const next = new Map();
+  entries.forEach((raw) => {
+    const normalized = normalizePresenceEntry(raw, { partial: false });
+    if (normalized) {
+      next.set(normalized.username, normalized);
+      updatePeerMedia(normalized.username, {
+        audio_enabled: normalized.audio_enabled,
+        video_enabled: normalized.video_enabled,
+      });
+    }
+  });
+  presenceMap = next;
+  participants = new Set(Array.from(presenceMap.keys()));
+  ensureSelfInParticipants();
+  const selfEntry = currentUsername ? presenceMap.get(currentUsername) : null;
+  if (selfEntry) {
+    localHandRaised = Boolean(selfEntry.hand_raised);
+    updateLatencyBadge(selfEntry.latency_ms, selfEntry.jitter_ms);
+    updateControlButtons();
+  }
+  refreshPresenceUi();
+}
+
+function updatePresenceEntry(entry) {
+  if (!entry || !entry.username) {
+    return;
+  }
+  const existing = presenceMap.get(entry.username) || { username: entry.username };
+  const merged = { ...existing, ...entry };
+  presenceMap.set(entry.username, merged);
+  participants.add(entry.username);
+  ensureVideoTile(entry.username);
+  const mediaUpdate = {};
+  if (Object.prototype.hasOwnProperty.call(entry, "audio_enabled") || !Object.prototype.hasOwnProperty.call(existing, "audio_enabled")) {
+    if (Object.prototype.hasOwnProperty.call(merged, "audio_enabled")) {
+      mediaUpdate.audio_enabled = merged.audio_enabled;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "video_enabled") || !Object.prototype.hasOwnProperty.call(existing, "video_enabled")) {
+    if (Object.prototype.hasOwnProperty.call(merged, "video_enabled")) {
+      mediaUpdate.video_enabled = merged.video_enabled;
+    }
+  }
+  if (Object.keys(mediaUpdate).length > 0) {
+    updatePeerMedia(entry.username, mediaUpdate);
+  }
+  if (entry.username === currentUsername) {
+    localHandRaised = Boolean(merged.hand_raised);
+    updateLatencyBadge(merged.latency_ms, merged.jitter_ms);
+    updateControlButtons();
+  }
+  refreshPresenceUi();
+}
+
+function patchLocalPresence(partial) {
+  if (!currentUsername) {
+    return;
+  }
+  const existing = presenceMap.get(currentUsername) || { username: currentUsername };
+  const merged = { ...existing, ...partial };
+  presenceMap.set(currentUsername, merged);
+  refreshPresenceUi();
+  updateControlButtons();
+}
+
+function updateTypingIndicator() {
+  if (!typingIndicatorEl) {
+    return;
+  }
+  const typers = Array.from(presenceMap.values()).filter((entry) => entry.username !== currentUsername && entry.is_typing);
+  if (typers.length === 0) {
+    typingIndicatorEl.textContent = "";
+    typingIndicatorEl.classList.add("hidden");
+    return;
+  }
+  let message;
+  if (typers.length === 1) {
+    message = `${typers[0].username} is typing…`;
+  } else if (typers.length === 2) {
+    message = `${typers[0].username} and ${typers[1].username} are typing…`;
+  } else {
+    message = `${typers.length} people are typing…`;
+  }
+  typingIndicatorEl.textContent = message;
+  typingIndicatorEl.classList.remove("hidden");
+}
+
+function updateLatencyBadge(latencyMs, jitterMs) {
+  if (!latencyBadgeEl) {
+    return;
+  }
+  latencyBadgeEl.classList.remove("latency-good", "latency-warn", "latency-bad");
+  if (latencyMs === null || latencyMs === undefined || Number.isNaN(latencyMs)) {
+    latencyBadgeEl.textContent = "Latency: --";
+    lastLatencyMetrics = null;
+    return;
+  }
+  const roundedLatency = Math.max(0, Math.round(latencyMs));
+  let text = `Latency: ${roundedLatency} ms`;
+  if (jitterMs !== null && jitterMs !== undefined && !Number.isNaN(jitterMs)) {
+    const roundedJitter = Math.max(0, Math.round(jitterMs));
+    text += ` • Jitter: ${roundedJitter} ms`;
+  }
+  latencyBadgeEl.textContent = text;
+  if (roundedLatency <= LATENCY_GOOD_MS) {
+    latencyBadgeEl.classList.add("latency-good");
+  } else if (roundedLatency <= LATENCY_WARN_MS) {
+    latencyBadgeEl.classList.add("latency-warn");
+  } else {
+    latencyBadgeEl.classList.add("latency-bad");
+  }
+  lastLatencyMetrics = {
+    latency_ms: latencyMs,
+    jitter_ms: jitterMs,
+  };
+}
+
+function applyMeetingTimer(status) {
+  if (!meetingTimerEl) {
+    return;
+  }
+  if (!status || status.is_active !== true) {
+    clearMeetingTimer();
+    return;
+  }
+  meetingTimerState = {
+    ...status,
+    _received_at: Date.now() / 1000,
+  };
+  if (status.is_expired) {
+    triggerTimeLimitExpiry();
+  } else {
+    meetingTimerAutoLeaveTriggered = false;
+  }
+  if (meetingTimerIntervalId !== null) {
+    clearInterval(meetingTimerIntervalId);
+  }
+  updateMeetingTimerTick();
+  meetingTimerIntervalId = window.setInterval(updateMeetingTimerTick, 1000);
+}
+
+function clearMeetingTimer() {
+  if (meetingTimerIntervalId !== null) {
+    clearInterval(meetingTimerIntervalId);
+    meetingTimerIntervalId = null;
+  }
+  meetingTimerState = null;
+  meetingTimerAutoLeaveTriggered = false;
+  if (meetingTimerEl) {
+    meetingTimerEl.textContent = "No time limit";
+    meetingTimerEl.classList.remove("expired");
+    meetingTimerEl.removeAttribute("title");
+  }
+}
+
+function updateMeetingTimerTick() {
+  if (!meetingTimerEl || !meetingTimerState) {
+    return;
+  }
+  const remaining = computeMeetingTimerRemaining(meetingTimerState);
+  const total = typeof meetingTimerState.duration_seconds === "number" ? meetingTimerState.duration_seconds : null;
+  if (remaining <= 0) {
+    meetingTimerEl.textContent = "Time limit reached";
+    meetingTimerEl.classList.add("expired");
+    triggerTimeLimitExpiry();
+  } else {
+    meetingTimerEl.textContent = formatMeetingTimer(remaining);
+    meetingTimerEl.classList.toggle("expired", remaining <= 0);
+  }
+  if (total) {
+    meetingTimerEl.setAttribute("title", `Total time ${formatMeetingTimer(total)}`);
+  } else {
+    meetingTimerEl.removeAttribute("title");
+  }
+}
+
+function computeMeetingTimerRemaining(state) {
+  const nowSeconds = Date.now() / 1000;
+  if (typeof state.end_timestamp === "number") {
+    return Math.max(0, Math.round(state.end_timestamp - nowSeconds));
+  }
+  if (typeof state.remaining_seconds === "number" && typeof state._received_at === "number") {
+    const elapsed = nowSeconds - state._received_at;
+    return Math.max(0, Math.round(state.remaining_seconds - elapsed));
+  }
+  if (typeof state.duration_seconds === "number" && typeof state.started_at === "number") {
+    const elapsed = nowSeconds - state.started_at;
+    return Math.max(0, Math.round(state.duration_seconds - elapsed));
+  }
+  return 0;
+}
+
+function formatMeetingTimer(totalSeconds) {
+  if (!Number.isFinite(totalSeconds)) {
+    return "--:--";
+  }
+  const value = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const seconds = value % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function triggerTimeLimitExpiry() {
+  if (meetingTimerAutoLeaveTriggered || wasKicked || !joined) {
+    return;
+  }
+  meetingTimerAutoLeaveTriggered = true;
+  joined = false;
+  flashStatus(`${TIME_LIMIT_LEAVE_REASON}. Disconnecting…`, "warning", 4000);
+  setConnectedUi(false);
+  leaveButton.disabled = true;
+  setJoinFormEnabled(false);
+  resetLeaveFlow();
+  if (joinOverlay) {
+    joinOverlay.classList.remove("hidden");
+  }
+  if (joinSection) {
+    joinSection.classList.remove("hidden");
+  }
+  if (leaveSection) {
+    leaveSection.classList.add("hidden");
+  }
+  setJoinStatus(`${TIME_LIMIT_LEAVE_REASON}. Disconnecting…`, false);
+  updateStatusLine(TIME_LIMIT_LEAVE_REASON);
+  sendControl("leave_session", { force: true, auto: true, reason: TIME_LIMIT_LEAVE_REASON });
+}
+
+function showAdminBanner(notice) {
+  if (!adminBannerEl) {
+    return;
+  }
+  const message = notice && typeof notice.message === "string" ? notice.message.trim() : "";
+  if (!message) {
+    hideAdminBanner();
+    return;
+  }
+  const rawLevel = notice && typeof notice.level === "string" ? notice.level.toLowerCase() : "info";
+  const allowedLevels = new Set(["info", "success", "warning", "error"]);
+  const level = allowedLevels.has(rawLevel) ? rawLevel : "info";
+  adminBannerEl.textContent = message;
+  adminBannerEl.classList.remove("hidden", "banner-info", "banner-success", "banner-warning", "banner-error");
+  adminBannerEl.classList.add(`banner-${level}`);
+  if (adminBannerTimeoutId !== null) {
+    clearTimeout(adminBannerTimeoutId);
+  }
+  const timeoutMs = notice && typeof notice.timeout_ms === "number" ? notice.timeout_ms : 12000;
+  adminBannerTimeoutId = window.setTimeout(() => {
+    hideAdminBanner();
+  }, Math.max(3000, timeoutMs));
+}
+
+function hideAdminBanner() {
+  if (!adminBannerEl) {
+    return;
+  }
+  adminBannerEl.classList.add("hidden");
+  adminBannerEl.classList.remove("banner-info", "banner-success", "banner-warning", "banner-error");
+  if (adminBannerTimeoutId !== null) {
+    clearTimeout(adminBannerTimeoutId);
+    adminBannerTimeoutId = null;
+  }
+}
+
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch((err) => {
+      console.warn("Clipboard write failed", err);
+    });
+  }
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.value = text;
+    document.body.appendChild(input);
+    input.select();
+    try {
+      document.execCommand("copy");
+    } catch (err) {
+      console.warn("Fallback clipboard copy failed", err);
+    }
+    document.body.removeChild(input);
+    resolve();
+  });
+}
+
+function spawnReaction(entry) {
+  if (!reactionStreamEl || !entry || !entry.reaction) {
+    return;
+  }
+  const burst = document.createElement("div");
+  burst.className = "reaction-burst";
+  burst.textContent = entry.reaction;
+  if (entry.username) {
+    burst.title = `${entry.username} reacted with ${entry.reaction}`;
+  }
+  reactionStreamEl.appendChild(burst);
+  burst.addEventListener("animationend", () => {
+    burst.remove();
+  });
+  while (reactionStreamEl.childElementCount > MAX_REACTION_STREAM_ITEMS) {
+    const first = reactionStreamEl.firstElementChild;
+    if (first) {
+      first.remove();
+    } else {
+      break;
+    }
+  }
+}
+
+function replayRecentReactions(reactions) {
+  if (!Array.isArray(reactions) || reactions.length === 0) {
+    return;
+  }
+  const recent = reactions.slice(-REACTION_REPLAY_LIMIT);
+  recent.forEach((reaction, index) => {
+    setTimeout(() => spawnReaction(reaction), index * 180);
+  });
+}
+
+function setReactionMenu(open) {
+  if (!reactionPicker || !reactionsBtn) {
+    return;
+  }
+  reactionMenuOpen = Boolean(open);
+  reactionPicker.classList.toggle("hidden", !reactionMenuOpen);
+  reactionsBtn.setAttribute("aria-expanded", reactionMenuOpen ? "true" : "false");
+}
+
+function closeReactionMenu() {
+  setReactionMenu(false);
+}
+
+function handleReactionSelection(rawReaction) {
+  const reaction = typeof rawReaction === "string" ? rawReaction.trim() : "";
+  if (!reaction) {
+    closeReactionMenu();
+    return;
+  }
+  if (!joined) {
+    flashStatus("Join the session to send reactions", "warning", 3000);
+    closeReactionMenu();
+    return;
+  }
+  sendControl("send_reaction", { reaction });
+  spawnReaction({ username: currentUsername || "You", reaction });
+  closeReactionMenu();
+}
+
+function isEditableTarget(target) {
+  if (!target) {
+    return false;
+  }
+  if (target.isContentEditable) {
+    return true;
+  }
+  const tagName = target.tagName;
+  return tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+}
+
+function sendTypingState(isTyping) {
+  const desired = Boolean(isTyping);
+  if (typingActive === desired && desired) {
+    return;
+  }
+  typingActive = desired;
+  if (!joined) {
+    return;
+  }
+  sendControl("typing", { is_typing: desired });
+  if (!isTyping && typingResetId) {
+    clearTimeout(typingResetId);
+    typingResetId = null;
+  }
+}
+
+function requestTypingStart() {
+  if (!joined) {
+    return;
+  }
+  if (typingDebounceId) {
+    clearTimeout(typingDebounceId);
+  }
+  typingDebounceId = window.setTimeout(() => {
+    sendTypingState(true);
+    typingDebounceId = null;
+  }, TYPING_DEBOUNCE_MS);
+  scheduleTypingStop();
+}
+
+function scheduleTypingStop() {
+  if (typingResetId) {
+    clearTimeout(typingResetId);
+  }
+  typingResetId = window.setTimeout(() => {
+    typingResetId = null;
+    if (typingDebounceId) {
+      clearTimeout(typingDebounceId);
+      typingDebounceId = null;
+    }
+    if (typingActive) {
+      sendTypingState(false);
+    }
+  }, TYPING_IDLE_TIMEOUT_MS);
+}
+
+function resetTypingState() {
+  if (typingDebounceId) {
+    clearTimeout(typingDebounceId);
+    typingDebounceId = null;
+  }
+  if (typingResetId) {
+    clearTimeout(typingResetId);
+    typingResetId = null;
+  }
+  if (typingActive) {
+    typingActive = false;
+    if (joined) {
+      sendControl("typing", { is_typing: false });
+    }
+  }
+}
+
+function setHandRaised(desired) {
+  if (!joined || !currentUsername) {
+    return;
+  }
+  const next = Boolean(desired);
+  if (localHandRaised === next) {
+    return;
+  }
+  localHandRaised = next;
+  sendControl("toggle_hand", { hand_raised: next });
+  patchLocalPresence({ hand_raised: next });
+  updateControlButtons();
+}
+
+function handleGlobalKeydown(event) {
+  if (event.key === "Escape" && reactionMenuOpen) {
+    closeReactionMenu();
+  }
+  if (!joined) {
+    return;
+  }
+  const target = event.target;
+  const noModifier = !event.altKey && !event.ctrlKey && !event.metaKey;
+  if (isEditableTarget(target)) {
+    if (event.key === "Escape") {
+      return;
+    }
+    if (!(event.ctrlKey || event.metaKey)) {
+      return;
+    }
+  }
+  if (!noModifier) {
+    return;
+  }
+  switch (event.code) {
+    case "KeyM":
+      if (micToggleBtn && !micToggleBtn.disabled) {
+        event.preventDefault();
+        micToggleBtn.click();
+      }
+      break;
+    case "KeyV":
+      if (videoToggleBtn && !videoToggleBtn.disabled) {
+        event.preventDefault();
+        videoToggleBtn.click();
+      }
+      break;
+    case "KeyH":
+      if (handToggleBtn && !handToggleBtn.disabled) {
+        event.preventDefault();
+        setHandRaised(!localHandRaised);
+      }
+      break;
+    case "KeyR":
+      if (reactionsBtn && !reactionsBtn.disabled) {
+        event.preventDefault();
+        setReactionMenu(!reactionMenuOpen);
+      }
+      break;
+    case "KeyP":
+      if (presentToggleBtn && !presentToggleBtn.disabled) {
+        event.preventDefault();
+        presentToggleBtn.click();
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+async function uploadFilesSequentially(fileList) {
+  if (!fileList || fileList.length === 0) {
+    return;
+  }
+  if (!joined) {
+    flashStatus("Join the session to upload files", "warning", 3000);
+    return;
+  }
+  for (const file of fileList) {
+    const data = new FormData();
+    data.append("file", file);
+    try {
+      const res = await fetch("/api/files/upload", { method: "POST", body: data });
+      if (!res.ok) {
+        let message = `Upload failed for ${file.name}`;
+        try {
+          const error = await res.json();
+          if (error?.detail) {
+            message = error.detail;
+          }
+        } catch (err) {
+          console.error("Upload error detail parse failed", err);
+        }
+        flashStatus(message, "error", 5000);
+      } else {
+        flashStatus(`Uploaded ${file.name}`, "info", 2500);
+      }
+    } catch (err) {
+      console.error("Upload error", err);
+      flashStatus(`Upload error for ${file.name}`, "error", 5000);
+    }
+  }
+  sendControl("file_request_list");
+}
+
+function showDragOverlay() {
+  if (!dragOverlay) {
+    return;
+  }
+  dragOverlay.classList.remove("hidden");
+}
+
+function hideDragOverlay() {
+  if (!dragOverlay) {
+    return;
+  }
+  dragOverlay.classList.add("hidden");
+  dragDepthCounter = 0;
+}
+
+function eventHasFiles(event) {
+  return Boolean(event?.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files"));
+}
+
+function handleDragEnter(event) {
+  if (!joined || !eventHasFiles(event)) {
+    return;
+  }
+  event.preventDefault();
+  dragDepthCounter += 1;
+  showDragOverlay();
+}
+
+function handleDragOver(event) {
+  if (!joined || !eventHasFiles(event)) {
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+}
+
+function handleDragLeave(event) {
+  if (!joined || !eventHasFiles(event)) {
+    return;
+  }
+  event.preventDefault();
+  dragDepthCounter = Math.max(0, dragDepthCounter - 1);
+  if (dragDepthCounter === 0) {
+    hideDragOverlay();
+  }
+}
+
+function handleDrop(event) {
+  if (!eventHasFiles(event)) {
+    return;
+  }
+  event.preventDefault();
+  if (!joined) {
+    hideDragOverlay();
+    flashStatus("Join the session to upload files", "warning", 3000);
+    return;
+  }
+  hideDragOverlay();
+  const filesArray = event.dataTransfer ? Array.from(event.dataTransfer.files || []) : [];
+  if (filesArray.length === 0) {
+    return;
+  }
+  uploadFilesSequentially(filesArray);
+}
+
 let videoWatchdogTimerId = null;
 
 function init() {
@@ -122,7 +838,16 @@ function init() {
   showScreenMessage("No presenter");
   startVideoWatchdog();
   startScreenWatchdog();
+  updateLatencyBadge(null, null);
   
+  setupNotificationBadges();
+  window.addEventListener("focus", clearNotificationsForActiveTab);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      clearNotificationsForActiveTab();
+    }
+  });
+
   // Setup sidebar toggle
   toggleParticipantsBtn.addEventListener("click", toggleParticipantsSidebar);
   toggleChatBtn.addEventListener("click", toggleChatSidebar);
@@ -133,6 +858,50 @@ function init() {
   tabBtns.forEach((btn) => {
     btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
+
+  if (reactionsBtn) {
+    reactionsBtn.addEventListener("click", () => {
+      if (reactionsBtn.disabled) {
+        return;
+      }
+      setReactionMenu(!reactionMenuOpen);
+    });
+  }
+  reactionOptions.forEach((option) => {
+    option.addEventListener("click", (event) => {
+      event.preventDefault();
+      handleReactionSelection(option.dataset.reaction);
+    });
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!reactionMenuOpen) {
+      return;
+    }
+    if (reactionsBtn?.contains(event.target) || reactionPicker?.contains(event.target)) {
+      return;
+    }
+    closeReactionMenu();
+  });
+
+  document.addEventListener("keydown", handleGlobalKeydown);
+
+  if (chatInput) {
+    chatInput.addEventListener("input", () => {
+      requestTypingStart();
+    });
+    chatInput.addEventListener("keydown", () => {
+      requestTypingStart();
+    });
+    chatInput.addEventListener("blur", () => {
+      resetTypingState();
+    });
+  }
+
+  document.addEventListener("dragenter", handleDragEnter);
+  document.addEventListener("dragover", handleDragOver);
+  document.addEventListener("dragleave", handleDragLeave);
+  document.addEventListener("drop", handleDrop);
 }
 
 function toggleParticipantsSidebar() {
@@ -153,6 +922,7 @@ function toggleChatSidebar() {
     hideSidebar(participantsSidebar);
     toggleChatBtn.classList.add("active");
     toggleParticipantsBtn.classList.remove("active");
+    clearNotificationsForActiveTab();
   } else {
     hideSidebar(chatSidebar);
     toggleChatBtn.classList.remove("active");
@@ -189,18 +959,233 @@ function switchTab(tabName) {
   if (activeBtn) {
     activeBtn.classList.add("active");
   }
+
+  if (tabName === "chat") {
+    resetChatNotifications();
+  } else if (tabName === "files") {
+    resetFileNotifications();
+  }
+}
+
+function setupNotificationBadges() {
+  if (toggleChatBtn && !chatToggleBadgeEl) {
+    chatToggleBadgeEl = document.createElement("span");
+    chatToggleBadgeEl.className = "notification-badge hidden";
+    chatToggleBadgeEl.setAttribute("aria-hidden", "true");
+    toggleChatBtn.appendChild(chatToggleBadgeEl);
+  }
+  if (chatTabBtn && !chatTabBadgeEl) {
+    chatTabBadgeEl = document.createElement("span");
+    chatTabBadgeEl.className = "notification-badge hidden";
+    chatTabBadgeEl.setAttribute("aria-hidden", "true");
+    chatTabBtn.appendChild(chatTabBadgeEl);
+  }
+  if (filesTabBtn && !filesTabBadgeEl) {
+    filesTabBadgeEl = document.createElement("span");
+    filesTabBadgeEl.className = "notification-badge hidden";
+    filesTabBadgeEl.setAttribute("aria-hidden", "true");
+    filesTabBtn.appendChild(filesTabBadgeEl);
+  }
+  updateSidebarNotificationBadge();
+  updateChatNotificationBadge();
+  updateFilesNotificationBadge();
+}
+
+function formatNotificationCount(count) {
+  if (!Number.isFinite(count) || count <= 0) {
+    return "";
+  }
+  if (count > 9) {
+    return "9+";
+  }
+  return String(count);
+}
+
+function updateSidebarNotificationBadge() {
+  if (!chatToggleBadgeEl || !toggleChatBtn) {
+    return;
+  }
+  const combined = chatUnreadCount + filesUnreadCount;
+  if (combined > 0) {
+    chatToggleBadgeEl.textContent = formatNotificationCount(combined);
+    chatToggleBadgeEl.classList.remove("hidden");
+    toggleChatBtn.classList.add("has-notification");
+  } else {
+    chatToggleBadgeEl.textContent = "";
+    chatToggleBadgeEl.classList.add("hidden");
+    toggleChatBtn.classList.remove("has-notification");
+  }
+}
+
+function updateChatNotificationBadge() {
+  if (!chatTabBadgeEl || !chatTabBtn) {
+    return;
+  }
+  if (chatUnreadCount > 0) {
+    chatTabBadgeEl.textContent = formatNotificationCount(chatUnreadCount);
+    chatTabBadgeEl.classList.remove("hidden");
+    chatTabBtn.classList.add("has-notification");
+  } else {
+    chatTabBadgeEl.textContent = "";
+    chatTabBadgeEl.classList.add("hidden");
+    chatTabBtn.classList.remove("has-notification");
+  }
+  updateSidebarNotificationBadge();
+}
+
+function updateFilesNotificationBadge() {
+  if (!filesTabBadgeEl || !filesTabBtn) {
+    return;
+  }
+  if (filesUnreadCount > 0) {
+    filesTabBadgeEl.textContent = formatNotificationCount(filesUnreadCount);
+    filesTabBadgeEl.classList.remove("hidden");
+    filesTabBtn.classList.add("has-notification");
+  } else {
+    filesTabBadgeEl.textContent = "";
+    filesTabBadgeEl.classList.add("hidden");
+    filesTabBtn.classList.remove("has-notification");
+  }
+  updateSidebarNotificationBadge();
+}
+
+function resetChatNotifications() {
+  chatUnreadCount = 0;
+  updateChatNotificationBadge();
+}
+
+function resetFileNotifications() {
+  filesUnreadCount = 0;
+  updateFilesNotificationBadge();
+}
+
+function clearNotificationsForActiveTab() {
+  if (!chatSidebar || chatSidebar.classList.contains("hidden")) {
+    return;
+  }
+  if (chatTabContent && chatTabContent.classList.contains("active")) {
+    resetChatNotifications();
+  } else if (filesTabContent && filesTabContent.classList.contains("active")) {
+    resetFileNotifications();
+  }
+}
+
+function windowHasFocus() {
+  return document.hasFocus() && !document.hidden;
+}
+
+function isChatSidebarVisible() {
+  return Boolean(chatSidebar && !chatSidebar.classList.contains("hidden"));
+}
+
+function isChatTabActive() {
+  return Boolean(chatTabContent && chatTabContent.classList.contains("active"));
+}
+
+function isFilesTabActive() {
+  return Boolean(filesTabContent && filesTabContent.classList.contains("active"));
+}
+
+function runWithSuppressedChat(callback) {
+  const previous = suppressChatNotifications;
+  suppressChatNotifications = true;
+  try {
+    callback();
+  } finally {
+    suppressChatNotifications = previous;
+  }
+}
+
+function runWithSuppressedFile(callback) {
+  const previous = suppressFileNotifications;
+  suppressFileNotifications = true;
+  try {
+    callback();
+  } finally {
+    suppressFileNotifications = previous;
+  }
+}
+
+function handleChatNotification(sender) {
+  if (suppressChatNotifications) {
+    return;
+  }
+  if (typeof sender === "string" && currentUsername && sender === currentUsername) {
+    return;
+  }
+  const inView = isChatSidebarVisible() && isChatTabActive() && windowHasFocus();
+  if (inView) {
+    return;
+  }
+  const wasZero = chatUnreadCount === 0;
+  chatUnreadCount = Math.min(99, chatUnreadCount + 1);
+  updateChatNotificationBadge();
+  if (wasZero) {
+    const name = typeof sender === "string" && sender.trim() ? sender.trim() : "New chat message";
+    const message = sender && sender.trim() ? `New message from ${sender.trim()}` : name;
+    flashStatus(message, "info", 3200);
+  }
+}
+
+function handleFileNotification({ uploader, filename }) {
+  if (suppressFileNotifications) {
+    return;
+  }
+  const inView = isChatSidebarVisible() && isFilesTabActive() && windowHasFocus();
+  if (!inView) {
+    const wasZero = filesUnreadCount === 0;
+    filesUnreadCount = Math.min(99, filesUnreadCount + 1);
+    updateFilesNotificationBadge();
+    if (wasZero) {
+      const safeName = typeof filename === "string" && filename.trim() ? filename.trim() : "a file";
+      const displayName = safeName.length > 32 ? `${safeName.slice(0, 29)}…` : safeName;
+      if (uploader && uploader !== currentUsername) {
+        flashStatus(`${uploader} shared ${displayName}`, "info", 3500);
+      } else {
+        flashStatus(`New shared file: ${displayName}`, "info", 3500);
+      }
+    }
+  }
+}
+
+function setPersistentStatus(text, severity) {
+  persistentStatus = {
+    text: typeof text === "string" ? text : "",
+    severity: severity === "error" || severity === "warning" ? severity : "info",
+  };
+}
+
+function applyPersistentStatus() {
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = persistentStatus.text;
+  statusEl.classList.toggle("error", persistentStatus.severity === "error");
+  statusEl.classList.toggle("warning", persistentStatus.severity === "warning");
+  if (persistentStatus.severity !== "error" && persistentStatus.severity !== "warning") {
+    statusEl.classList.remove("error", "warning");
+  }
 }
 
 function flashStatus(message, severity = "info", duration = 4000) {
   if (!message) return;
+  if (statusRestoreTimerId) {
+    clearTimeout(statusRestoreTimerId);
+    statusRestoreTimerId = null;
+  }
   statusEl.textContent = message;
   statusEl.classList.toggle("error", severity === "error");
   statusEl.classList.toggle("warning", severity === "warning");
+  if (severity !== "error" && severity !== "warning") {
+    statusEl.classList.remove("error", "warning");
+  }
   if (duration > 0) {
-    setTimeout(() => {
-      statusEl.textContent = "";
-      statusEl.classList.remove("error", "warning");
+    statusRestoreTimerId = window.setTimeout(() => {
+      statusRestoreTimerId = null;
+      applyPersistentStatus();
     }, duration);
+  } else {
+    setPersistentStatus(message, severity);
   }
 }
 
@@ -284,6 +1269,29 @@ function updatePeerMedia(username, state) {
     }
   }
   peerMedia.set(username, next);
+  if (username === currentUsername && state && typeof state === "object") {
+    let changed = false;
+    if (Object.prototype.hasOwnProperty.call(state, "audio_enabled")) {
+      const nextAudio = Boolean(state.audio_enabled);
+      if (micEnabled !== nextAudio) {
+        micEnabled = nextAudio;
+        changed = true;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(state, "video_enabled")) {
+      const nextVideo = Boolean(state.video_enabled);
+      if (videoEnabled !== nextVideo) {
+        videoEnabled = nextVideo;
+        changed = true;
+      }
+    }
+    if (changed) {
+      patchLocalPresence({
+        audio_enabled: next.audio_enabled,
+        video_enabled: next.video_enabled,
+      });
+    }
+  }
 }
 
 function applyMediaSnapshot(snapshot) {
@@ -483,8 +1491,62 @@ function handleServerEvent(type, payload) {
     case "file_progress":
       handleFileProgress(payload);
       break;
+    case "file_upload_complete":
+      handleFileUploadComplete(payload);
+      break;
+    case "file_download_ready":
+      handleFileDownloadReady(payload);
+      break;
+    case "file_share_link":
+      handleFileShareLink(payload);
+      break;
     case "kicked":
       enterKickedState(payload || {});
+      break;
+    case "presence_sync":
+      applyPresenceSnapshot(payload.participants || []);
+      break;
+    case "presence_update":
+      {
+        const normalized = normalizePresenceEntry(payload, { partial: true });
+        if (normalized) {
+          updatePresenceEntry(normalized);
+        }
+      }
+      break;
+    case "typing_status":
+      if (payload && typeof payload.username === "string") {
+        updatePresenceEntry({ username: payload.username, is_typing: Boolean(payload.is_typing) });
+      }
+      break;
+    case "hand_status":
+      if (payload && typeof payload.username === "string") {
+        updatePresenceEntry({ username: payload.username, hand_raised: Boolean(payload.hand_raised) });
+      }
+      break;
+    case "reaction":
+      spawnReaction(payload);
+      break;
+    case "latency_update":
+      if (payload && typeof payload.username === "string") {
+        updatePresenceEntry({
+          username: payload.username,
+          latency_ms: payload.latency_ms,
+          jitter_ms: payload.jitter_ms,
+        });
+      }
+      if (payload && payload.username === currentUsername) {
+        updateLatencyBadge(payload.latency_ms, payload.jitter_ms);
+      }
+      break;
+    case "latency_metrics":
+      updateLatencyBadge(payload.latency_ms, payload.jitter_ms);
+      break;
+    case "time_limit_update":
+      applyMeetingTimer(payload);
+      break;
+    case "admin_notice":
+      showAdminBanner(payload);
       break;
     default:
       console.log("Unknown event type", type);
@@ -505,12 +1567,44 @@ function handleSessionStatus({ state, username, message }) {
     case "connecting":
       setJoinStatus(`Connecting as ${username}...`, false);
       break;
+    case "reconnecting":
+      joined = false;
+      setConnectedUi(false);
+      resetTypingState();
+      if (typeof username === "string") {
+        setJoinStatus(`Reconnecting as ${username}...`, false);
+      }
+      flashStatus("Connection lost. Attempting to reconnect…", "warning", 4000);
+      updateStatusLine("Reconnecting...");
+      break;
+    case "disconnecting":
+      joined = false;
+      setConnectedUi(false);
+      leaveButton.disabled = true;
+      setJoinFormEnabled(false);
+      resetLeaveFlow();
+      if (joinOverlay) {
+        joinOverlay.classList.remove("hidden");
+      }
+      if (joinSection) {
+        joinSection.classList.remove("hidden");
+      }
+      if (leaveSection) {
+        leaveSection.classList.add("hidden");
+      }
+      setJoinStatus(message || "Disconnecting...", false);
+      updateStatusLine(message || "Disconnecting...");
+      resetChatNotifications();
+      resetFileNotifications();
+      break;
     case "error":
       joined = false;
       setJoinStatus(message || "Connection error", true);
       if (!wasKicked) {
         setJoinFormEnabled(true);
       }
+      resetChatNotifications();
+      resetFileNotifications();
       break;
     case "kicked":
       enterKickedState({ reason: message });
@@ -523,6 +1617,10 @@ function handleSessionStatus({ state, username, message }) {
       joined = false;
       setJoinStatus("Idle", false);
       setJoinFormEnabled(true);
+      clearMeetingTimer();
+      hideAdminBanner();
+      resetChatNotifications();
+      resetFileNotifications();
       break;
     default:
       console.log("Unknown session state", state);
@@ -540,10 +1638,13 @@ function updateStatusLine(fallback) {
       statusEl.textContent = kickedReason || fallback || "Removed by administrator";
       statusEl.classList.add("error");
       statusEl.classList.remove("warning");
+      setPersistentStatus(statusEl.textContent, "error");
       return;
     }
     statusEl.textContent = fallback || "Offline";
     statusEl.classList.add("error");
+    statusEl.classList.remove("warning");
+    setPersistentStatus(statusEl.textContent, "error");
     return;
   }
   const pieces = [`Connected as ${currentUsername}`];
@@ -553,6 +1654,7 @@ function updateStatusLine(fallback) {
   statusEl.textContent = pieces.join(" • ");
   statusEl.classList.remove("error");
   statusEl.classList.remove("warning");
+  setPersistentStatus(statusEl.textContent, "info");
 }
 
 function setConnectedUi(enabled) {
@@ -562,9 +1664,18 @@ function setConnectedUi(enabled) {
   micToggleBtn.disabled = !enabled;
   videoToggleBtn.disabled = !enabled;
   presentToggleBtn.disabled = !enabled;
+  if (handToggleBtn) {
+    handToggleBtn.disabled = !enabled;
+  }
+  if (reactionsBtn) {
+    reactionsBtn.disabled = !enabled;
+  }
   leaveButton.disabled = !enabled;
   toggleParticipantsBtn.disabled = !enabled;
   toggleChatBtn.disabled = !enabled;
+  if (!enabled) {
+    closeReactionMenu();
+  }
 }
 
 function setJoinFormEnabled(enabled) {
@@ -585,6 +1696,8 @@ function enterKickedState(payload = {}) {
     return;
   }
   wasKicked = true;
+  clearMeetingTimer();
+  hideAdminBanner();
   const reason = typeof payload.reason === "string" ? payload.reason : typeof payload.message === "string" ? payload.message : "An administrator removed you from this meeting.";
   kickedReason = reason;
   setConnectedUi(false);
@@ -593,6 +1706,7 @@ function enterKickedState(payload = {}) {
   currentPresenter = null;
   micEnabled = false;
   videoEnabled = false;
+  resetTypingState();
   updateControlButtons();
   participants = new Set();
   renderParticipants();
@@ -612,6 +1726,8 @@ function enterKickedState(payload = {}) {
   toggleParticipantsBtn.classList.remove("active");
   toggleChatBtn.classList.remove("active");
   resetLeaveFlow();
+  resetChatNotifications();
+  resetFileNotifications();
   flashStatus(reason, "error", 0);
   updateStatusLine("Removed by administrator");
   if (joinStatusEl) {
@@ -642,21 +1758,39 @@ function initState(payload) {
   }
   joined = true;
   currentUsername = payload.username;
-  micEnabled = false;
-  videoEnabled = false;
+  micEnabled = Boolean(payload.media?.audio_enabled || payload.media_state?.[currentUsername]?.audio_enabled);
+  videoEnabled = Boolean(payload.media?.video_enabled || payload.media_state?.[currentUsername]?.video_enabled);
+  localHandRaised = Boolean(payload.hand_raised);
   updateStatusLine();
   participants = new Set(payload.peers || []);
   ensureSelfInParticipants();
   peerMedia.clear();
   setPresenterState(payload.presenter || null);
-  renderParticipants();
-  chatMessagesEl.innerHTML = "";
-  (payload.chat_history || []).forEach((msg) => appendChatMessage(msg));
-  files = new Map();
-  (payload.files || []).forEach((file) => {
-    files.set(file.file_id, file);
+  applyPresenceSnapshot(payload.presence || []);
+  applyMeetingTimer(payload.time_limit || null);
+  if (Array.isArray(payload.admin_notices) && payload.admin_notices.length > 0) {
+    const latestNotice = payload.admin_notices[payload.admin_notices.length - 1];
+    showAdminBanner(latestNotice);
+  }
+  (payload.peers || []).forEach((name) => {
+    if (typeof name === "string" && name.trim()) {
+      participants.add(name.trim());
+    }
+  });
+  refreshPresenceUi();
+  runWithSuppressedChat(() => {
+    chatMessagesEl.innerHTML = "";
+    (payload.chat_history || []).forEach((msg) => appendChatMessage(msg));
+  });
+  resetChatNotifications();
+  runWithSuppressedFile(() => {
+    files = new Map();
+    (payload.files || []).forEach((file) => {
+      files.set(file.file_id, file);
+    });
   });
   renderFiles();
+  resetFileNotifications();
   sendControl("file_request_list");
   videoElements.clear();
   videoGridEl.innerHTML = "";
@@ -664,7 +1798,18 @@ function initState(payload) {
   participants.forEach((name) => ensureVideoTile(name));
   ensureVideoTile(currentUsername);
   applyMediaSnapshot(payload.media_state || payload.peer_media);
+  const latency = payload.latency || null;
+  if (latency) {
+    updateLatencyBadge(latency.latency_ms, latency.jitter_ms);
+  } else {
+    updateLatencyBadge(null, null);
+  }
+  replayRecentReactions(payload.reactions || []);
   resetLeaveFlow();
+  resetTypingState();
+  setConnectedUi(true);
+  leaveButton.disabled = false;
+  joinOverlay.classList.add("hidden");
   updateControlButtons();
   updateParticipantSummary();
 }
@@ -685,14 +1830,31 @@ function handleStateSnapshot(snapshot) {
   }
   participants = new Set(snapshot.peers || []);
   ensureSelfInParticipants();
-  renderParticipants();
-  chatMessagesEl.innerHTML = "";
-  (snapshot.chat_history || []).forEach((msg) => appendChatMessage(msg));
-  files = new Map();
-  (snapshot.files || []).forEach((file) => {
-    files.set(file.file_id, file);
+  applyPresenceSnapshot(snapshot.presence || []);
+  (snapshot.peers || []).forEach((name) => {
+    if (typeof name === "string" && name.trim()) {
+      participants.add(name.trim());
+    }
+  });
+  applyMeetingTimer(snapshot.time_limit || null);
+  if (Array.isArray(snapshot.admin_notices) && snapshot.admin_notices.length > 0) {
+    const latestNotice = snapshot.admin_notices[snapshot.admin_notices.length - 1];
+    showAdminBanner(latestNotice);
+  }
+  refreshPresenceUi();
+  runWithSuppressedChat(() => {
+    chatMessagesEl.innerHTML = "";
+    (snapshot.chat_history || []).forEach((msg) => appendChatMessage(msg));
+  });
+  resetChatNotifications();
+  runWithSuppressedFile(() => {
+    files = new Map();
+    (snapshot.files || []).forEach((file) => {
+      files.set(file.file_id, file);
+    });
   });
   renderFiles();
+  resetFileNotifications();
   const media = snapshot.media || {};
   micEnabled = Boolean(media.audio_enabled);
   videoEnabled = Boolean(media.video_enabled);
@@ -710,6 +1872,16 @@ function handleStateSnapshot(snapshot) {
   joinOverlay.classList.add("hidden");
   updateStatusLine();
   sendControl("file_request_list");
+  const latency = snapshot.latency || lastLatencyMetrics || null;
+  if (latency) {
+    updateLatencyBadge(latency.latency_ms, latency.jitter_ms);
+  } else {
+    updateLatencyBadge(null, null);
+  }
+  replayRecentReactions(snapshot.reactions || []);
+  localHandRaised = Boolean(snapshot.hand_raised);
+  resetTypingState();
+  updateControlButtons();
   updateParticipantSummary();
 }
 
@@ -725,19 +1897,113 @@ function appendChatMessage({ sender, message, timestamp_ms }) {
   item.append(meta, body);
   chatMessagesEl.appendChild(item);
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  handleChatNotification(sender);
+}
+
+function sortParticipantEntries(entries) {
+  return entries.sort((a, b) => {
+    const aIsSelf = a.username === currentUsername;
+    const bIsSelf = b.username === currentUsername;
+    if (aIsSelf && !bIsSelf) return -1;
+    if (bIsSelf && !aIsSelf) return 1;
+    if (a.is_presenter && !b.is_presenter) return -1;
+    if (b.is_presenter && !a.is_presenter) return 1;
+    if (a.hand_raised && !b.hand_raised) return -1;
+    if (b.hand_raised && !a.hand_raised) return 1;
+    return a.username.localeCompare(b.username, undefined, { sensitivity: "base" });
+  });
 }
 
 function renderParticipants() {
+  if (!participantListEl) {
+    return;
+  }
   participantListEl.innerHTML = "";
   ensureSelfInParticipants();
-  Array.from(participants)
-    .sort((a, b) => a.localeCompare(b))
-    .forEach((username) => {
-      const li = document.createElement("li");
-      li.textContent = username === currentUsername ? `${username} (You)` : username;
-      participantListEl.appendChild(li);
-    });
-  updateParticipantSummary();
+  const entries = presenceMap.size
+    ? Array.from(presenceMap.values()).map((entry) => ({
+        ...entry,
+        is_presenter: entry.is_presenter || entry.username === currentPresenter,
+      }))
+    : Array.from(participants).map((username) => {
+        const mediaState = peerMedia.get(username) || {};
+        return {
+          username,
+          audio_enabled: Boolean(mediaState.audio_enabled),
+          video_enabled: Boolean(mediaState.video_enabled),
+          hand_raised: false,
+          is_presenter: username === currentPresenter,
+          is_typing: false,
+          latency_ms: null,
+          jitter_ms: null,
+        };
+      });
+  sortParticipantEntries(entries).forEach((entry) => {
+    const li = document.createElement("li");
+    li.className = "participant-row";
+    if (entry.username === currentUsername) {
+      li.classList.add("self");
+    }
+    if (entry.hand_raised) {
+      li.classList.add("hand-raised");
+    }
+
+    const avatar = createParticipantAvatar(entry.username);
+    const info = document.createElement("div");
+    info.className = "participant-info";
+
+    const nameRow = document.createElement("div");
+    nameRow.className = "participant-name";
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = entry.username === currentUsername ? `${entry.username} (You)` : entry.username;
+    nameRow.appendChild(nameSpan);
+
+    if (entry.is_presenter) {
+      const badge = document.createElement("span");
+      badge.className = "participant-badge";
+      badge.textContent = "Presenter";
+      nameRow.appendChild(badge);
+    }
+    if (entry.hand_raised) {
+      const badge = document.createElement("span");
+      badge.className = "participant-badge";
+      badge.textContent = "Hand Raised";
+      nameRow.appendChild(badge);
+    }
+
+    info.appendChild(nameRow);
+
+    const metaRow = document.createElement("div");
+    metaRow.className = "participant-meta";
+
+    const micStatus = document.createElement("span");
+    micStatus.textContent = entry.audio_enabled ? "🎤 On" : "🎤 Muted";
+    metaRow.appendChild(micStatus);
+
+    const cameraStatus = document.createElement("span");
+    cameraStatus.textContent = entry.video_enabled ? "🎥 On" : "🎥 Off";
+    metaRow.appendChild(cameraStatus);
+
+    if (entry.is_typing) {
+      const typingSpan = document.createElement("span");
+      typingSpan.textContent = "⌨️ Typing";
+      metaRow.appendChild(typingSpan);
+    }
+
+    if (entry.latency_ms !== null && entry.latency_ms !== undefined) {
+      const latencySpan = document.createElement("span");
+      latencySpan.className = "participant-latency";
+      latencySpan.textContent = `Latency ${Math.round(entry.latency_ms)} ms`;
+      metaRow.appendChild(latencySpan);
+    }
+
+    if (metaRow.childElementCount > 0) {
+      info.appendChild(metaRow);
+    }
+
+    li.append(avatar, info);
+    participantListEl.appendChild(li);
+  });
 }
 
 function ensureVideoTile(username) {
@@ -843,10 +2109,16 @@ function clearScreenFrame() {
 function handleFileOffer(payload) {
   if (payload.files) {
     files = new Map(payload.files.map((f) => [f.file_id, f]));
-  } else if (payload.file_id) {
-    files.set(payload.file_id, payload);
+    renderFiles();
+    return;
   }
-  renderFiles();
+  if (payload.file_id) {
+    files.set(payload.file_id, payload);
+    renderFiles();
+    const uploader = typeof payload.uploader === "string" ? payload.uploader : null;
+    const filename = typeof payload.filename === "string" ? payload.filename : null;
+    handleFileNotification({ uploader, filename });
+  }
 }
 
 function handleFileProgress(payload) {
@@ -860,24 +2132,84 @@ function handleFileProgress(payload) {
   renderFiles();
 }
 
+function handleFileUploadComplete(payload) {
+  const filename = typeof payload?.filename === "string" ? payload.filename : "File";
+  flashStatus(`${filename} uploaded`, "info", 2500);
+  sendControl("file_request_list");
+}
+
+function handleFileDownloadReady(payload) {
+  const fileId = payload?.file_id;
+  const url = typeof payload?.url === "string" ? payload.url : null;
+  if (!fileId || !url || !pendingDownloads.has(fileId)) {
+    return;
+  }
+  pendingDownloads.delete(fileId);
+  try {
+    window.open(url, "_blank", "noopener");
+  } catch (err) {
+    console.warn("Window open blocked, falling back to navigation", err);
+    window.location.href = url;
+  }
+}
+
+function handleFileShareLink(payload) {
+  const fileId = payload?.file_id;
+  const url = typeof payload?.url === "string" ? payload.url : null;
+  if (!fileId || !pendingShareLinks.has(fileId) || !url) {
+    return;
+  }
+  pendingShareLinks.delete(fileId);
+  copyTextToClipboard(url).finally(() => {
+    flashStatus("Share link copied to clipboard", "info", 2500);
+  });
+}
+
 function renderFiles() {
+  if (!fileListEl) {
+    return;
+  }
   fileListEl.innerHTML = "";
-  files.forEach((file, id) => {
+  Array.from(files.entries()).forEach(([id, file]) => {
     const li = document.createElement("li");
     li.className = "file-entry";
-    const info = document.createElement("div");
-    info.textContent = `${file.filename} (${formatBytes(file.total_size)})`;
+
+    const meta = document.createElement("div");
+    meta.className = "file-meta";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = file.filename || id;
+    meta.appendChild(nameSpan);
+
+    const detailSpan = document.createElement("span");
+    const totalSize = file.total_size || file.size;
+    const sizeText = typeof totalSize === "number" ? formatBytes(totalSize) : "Unknown";
+    let detailText = sizeText;
     if (file.received && file.total_size) {
-      const progress = Math.round((file.received / file.total_size) * 100);
-      info.textContent += ` - ${progress}%`;
+      const progress = Math.min(100, Math.max(0, Math.round((file.received / file.total_size) * 100)));
+      detailText = `${sizeText} • ${progress}%`;
     }
+    detailSpan.textContent = detailText;
+    meta.appendChild(detailSpan);
+
     const actions = document.createElement("div");
     actions.className = "file-actions";
+
     const downloadBtn = document.createElement("button");
+    downloadBtn.type = "button";
     downloadBtn.textContent = "⬇️";
-    downloadBtn.onclick = () => downloadFile(id);
+    downloadBtn.title = "Download";
+    downloadBtn.addEventListener("click", () => requestFileDownload(id));
     actions.appendChild(downloadBtn);
-    li.append(info, actions);
+
+    const shareBtn = document.createElement("button");
+    shareBtn.type = "button";
+    shareBtn.textContent = "🔗";
+    shareBtn.title = "Copy share link";
+    shareBtn.addEventListener("click", () => requestShareLink(id));
+    actions.appendChild(shareBtn);
+
+    li.append(meta, actions);
     fileListEl.appendChild(li);
   });
 }
@@ -894,8 +2226,42 @@ function formatBytes(size) {
   return `${value.toFixed(1)} ${units[idx]}`;
 }
 
-function downloadFile(fileId) {
-  window.location.href = `/api/files/download/${fileId}`;
+function requestFileDownload(fileId) {
+  if (!fileId) {
+    return;
+  }
+  if (!joined) {
+    window.location.href = `/api/files/download/${fileId}`;
+    return;
+  }
+  pendingDownloads.add(fileId);
+  const accepted = sendControl("file_download", { file_id: fileId });
+  if (!accepted) {
+    pendingDownloads.delete(fileId);
+    window.location.href = `/api/files/download/${fileId}`;
+  }
+}
+
+function requestShareLink(fileId) {
+  if (!fileId) {
+    return;
+  }
+  if (!joined) {
+    const fallbackUrl = `${window.location.origin}/api/files/download/${fileId}`;
+    copyTextToClipboard(fallbackUrl).finally(() => {
+      flashStatus("Share link copied to clipboard", "info", 2500);
+    });
+    return;
+  }
+  pendingShareLinks.add(fileId);
+  const accepted = sendControl("copy_file_link", { file_id: fileId });
+  if (!accepted) {
+    pendingShareLinks.delete(fileId);
+    const fallbackUrl = `${window.location.origin}/api/files/download/${fileId}`;
+    copyTextToClipboard(fallbackUrl).finally(() => {
+      flashStatus("Share link copied to clipboard", "info", 2500);
+    });
+  }
 }
 
 function updateControlButtons() {
@@ -918,6 +2284,10 @@ function updateControlButtons() {
   presentToggleBtn.title = presenterLocked
     ? `${currentPresenter} is currently presenting.`
     : "Start or stop sharing your screen";
+  if (handToggleBtn) {
+    handToggleBtn.classList.toggle("active", Boolean(localHandRaised));
+    handToggleBtn.title = localHandRaised ? "Lower hand" : "Raise hand";
+  }
 }
 
 function setPresenterState(username) {
@@ -1003,11 +2373,14 @@ function confirmLeave(autoTriggered = false) {
   joined = false;
   micEnabled = false;
   videoEnabled = false;
+  resetTypingState();
   setConnectedUi(false);
   const accepted = sendControl("leave_session", { force: true, auto: autoTriggered });
   setJoinStatus(accepted ? "Disconnecting..." : "Unable to signal disconnect", !accepted);
   updateControlButtons();
   updateStatusLine("Disconnecting...");
+  resetChatNotifications();
+  resetFileNotifications();
 }
 
 function ensureSelfInParticipants() {
@@ -1018,8 +2391,8 @@ function ensureSelfInParticipants() {
 
 function updateParticipantSummary() {
   ensureSelfInParticipants();
+  const count = presenceMap.size > 0 ? presenceMap.size : participants.size;
   if (participantCountDisplay) {
-    const count = participants.size;
     participantCountDisplay.textContent = `${count} ${count === 1 ? "participant" : "participants"}`;
   }
   updatePresenterHighlight();
@@ -1040,7 +2413,17 @@ function syncParticipantsFromServer(list) {
       peerMedia.delete(username);
     }
   });
-  renderParticipants();
+  if (presenceMap.size === 0) {
+    renderParticipants();
+  } else {
+    const names = new Set(filtered);
+    presenceMap.forEach((_, username) => {
+      if (!names.has(username) && username !== currentUsername) {
+        presenceMap.delete(username);
+      }
+    });
+    refreshPresenceUi();
+  }
   const known = new Set(participants);
   if (currentUsername) {
     known.add(currentUsername);
@@ -1051,6 +2434,7 @@ function syncParticipantsFromServer(list) {
       removeVideoTile(username);
     }
   });
+  updateParticipantSummary();
   return true;
 }
 
@@ -1129,33 +2513,25 @@ chatForm.addEventListener("submit", (event) => {
   if (!message) return;
   sendControl("chat_send", { message });
   chatInput.value = "";
+  resetTypingState();
 });
 
-uploadButton.addEventListener("click", async () => {
-  if (!joined || !fileInput.files?.length) return;
-  const data = new FormData();
-  data.append("file", fileInput.files[0]);
-  try {
-    const res = await fetch("/api/files/upload", { method: "POST", body: data });
-    if (res.ok) {
-      fileInput.value = "";
+if (uploadButton) {
+  uploadButton.addEventListener("click", async () => {
+    if (!fileInput.files?.length) return;
+    await uploadFilesSequentially(Array.from(fileInput.files));
+    fileInput.value = "";
+  });
+}
+
+if (handToggleBtn) {
+  handToggleBtn.addEventListener("click", () => {
+    if (handToggleBtn.disabled) {
       return;
     }
-    let message = "Upload failed";
-    try {
-      const error = await res.json();
-      if (error?.detail) {
-        message = error.detail;
-      }
-    } catch (parseErr) {
-      console.error("Upload error detail parse failed", parseErr);
-    }
-    flashStatus(message, "error", 5000);
-  } catch (err) {
-    console.error("Upload error", err);
-    flashStatus("Upload error", "error", 5000);
-  }
-});
+    setHandRaised(!localHandRaised);
+  });
+}
 
 joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1193,6 +2569,7 @@ micToggleBtn.addEventListener("click", () => {
   updateControlButtons();
   if (currentUsername) {
     updatePeerMedia(currentUsername, { audio_enabled: micEnabled });
+    patchLocalPresence({ audio_enabled: micEnabled });
   }
   sendControl("toggle_audio", { enabled: micEnabled });
 });
@@ -1204,6 +2581,7 @@ videoToggleBtn.addEventListener("click", () => {
   if (currentUsername) {
     applyVideoEnabledState(currentUsername, videoEnabled);
     updatePeerMedia(currentUsername, { video_enabled: videoEnabled });
+    patchLocalPresence({ video_enabled: videoEnabled });
   }
   sendControl("toggle_video", { enabled: videoEnabled });
 });

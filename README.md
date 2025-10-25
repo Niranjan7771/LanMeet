@@ -9,9 +9,12 @@ The LAN Collaboration Suite delivers real-time audio, video, screen sharing, cha
 | **Video conferencing** | Captures camera frames, compresses them as JPEG, streams over UDP, and provides a live self-preview in the browser UI. |
 | **Audio rooms** | Mixes live microphone input from every participant and replays to peers with minimal latency. |
 | **Screen sharing** | Lets one presenter share their desktop via reliable TCP until another takes the role, with an adjustable viewer size for attendees. |
-| **Rich chat** | Maintains per-session chat history, timestamps, and sender metadata. |
-| **File transfers** | Supports multiple simultaneous uploads, resumable chunks, and direct browser downloads. |
-| **Admin dashboard** | Shows connected users, presenter status, chat log, recent events, and live network metrics (connection type, IP, ports, throughput, bandwidth). |
+| **Presence & status** | Tracks live participant roster, typing indicators, raised hands, media state, and latency/jitter in the UI. |
+| **Reactions & hotkeys** | Emoji reactions float across the stage; keyboard shortcuts toggle mic, camera, hand, reactions, and presentation. |
+| **Reliable reconnect** | Clients automatically back off and reconnect when the control channel drops, preserving session context. |
+| **File transfers** | Supports multiple simultaneous uploads, resumable chunks, drag-and-drop uploads, and direct browser downloads/share links. |
+| **Security options** | Optional pre-shared key gate keeps both TCP control and UDP latency probe traffic. |
+| **Operational tooling** | Admin dashboard shows connected users, presenter status, chat log, recent events, and health metrics; configure meeting time limits, broadcast notices, latency summaries, storage usage, tail live server logs, and trigger a single-click shutdown that disconnects participants and clears temporary files before services exit. |
 
 ## Project Structure
 
@@ -77,23 +80,33 @@ pytest
 ### 4. Start the collaboration server
 
 ```powershell
-python -m server --host 0.0.0.0 --tcp-port 55000 --video-port 56000 --audio-port 57000 --screen-port 58000 --file-port 59000 --admin-port 8700
+python -m server ^
+	--host 0.0.0.0 ^
+	--tcp-port 55000 ^
+	--video-port 56000 ^
+	--audio-port 57000 ^
+	--screen-port 58000 ^
+	--file-port 59000 ^
+	--latency-port 59500 ^
+	--admin-port 8700
 ```
 
 **Flags explained:**
 
 - `--host 0.0.0.0` — bind to all interfaces so other LAN devices can connect.
 - `--tcp-port 55000` — control-channel TCP port (default `55000`).
-- `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000` — UDP/TCP transports for media services (defaults from `shared.protocol`).
+- `--video-port 56000`, `--audio-port 57000`, `--screen-port 58000`, `--file-port 59000`, `--latency-port 59500` — transports for media services and the UDP latency echo server (defaults from `shared.protocol`).
 - `--admin-port 8700` — admin dashboard HTTP port (default `8700`).
 - `--admin-host 0.0.0.0` — add this if the dashboard must be reachable from other machines.
+- `--pre-shared-key` — require clients to present a shared secret during connection and latency probes.
+- `--log-file logs/server.log` — enable rotating file logs alongside console output (`--log-max-bytes` / `--log-backup-count` fine tune rotation).
 - `--open-dashboard` — open the admin dashboard in a browser after startup (enabled automatically when launched without CLI arguments, e.g., by double-clicking the executable).
 - `--log-level DEBUG` — optional verbosity control for the server (defaults to `INFO`).
 
-**Example:** Restrict access to the local machine for testing:
+**Example:** Restrict access to the local machine for testing and require a pre-shared key:
 
 ```powershell
-python -m server --host 127.0.0.1 --admin-host 127.0.0.1
+python -m server --host 127.0.0.1 --admin-host 127.0.0.1 --pre-shared-key "secret123"
 ```
 
 The console logs each media service listener, prints URLs for the admin dashboard, and now records heartbeat diagnostics when run with `--log-level debug`.
@@ -110,9 +123,10 @@ python -m client 192.168.1.50 --tcp-port 55000 --ui-port 8100 --username "alex"
 - `--tcp-port` — must match the server’s control port.
 - `--ui-port` — HTTP port serving the web UI (default `8100`).
 - `--username` — optional initial display name; can be changed from the UI.
+- `--pre-shared-key` — shared secret that must match the server when PSK enforcement is enabled.
 - `--log-level` — choose `DEBUG` when you need per-heartbeat logs; defaults to `INFO`.
 
-Once started, the client automatically opens the browser at `http://127.0.0.1:8100`. Pick a display name (or randomize), then use the control bar to toggle microphone, camera, and screen sharing. A “Leave” button provides a 20-second undo window before fully disconnecting.
+Once started, the client automatically opens the browser at `http://127.0.0.1:8100`. Pick a display name (or randomize), then use the control bar to toggle microphone, camera, and screen sharing. A “Leave” button provides a 20-second undo window before fully disconnecting. When an admin-configured meeting time limit elapses, the client shows a “time limit reached” banner and exits on its own—no manual confirmation required.
 If the admin kicks a participant or they leave through the UI, the accompanying command-line client now shuts itself down automatically—no Ctrl+C required.
 
 ### 6. Join through the browser
@@ -122,7 +136,8 @@ If the admin kicks a participant or they leave through the UI, the accompanying 
 3. Toggle microphone, camera, or screen sharing as needed.
 4. Use the chat panel for text messages; uploads appear in the File Sharing pane with download buttons for everyone.
 
-The UI persists session state across page refreshes—chat history, presenter, files, and media toggles are restored automatically.
+The UI persists session state across page refreshes—chat history, presenter, files, media toggles, and reactions are restored automatically. Live presence keeps the participant list updated with avatars, hand status, typing indicators, and per-user latency badges. Drag-and-drop files anywhere in the window to upload without touching the file picker. Hotkeys (`M` mic, `V` video, `P` present, `H` hand, `R` reactions) provide quick control.
+Unread chat messages and newly shared files raise subtle badges on the chat toggle and tabs, along with a brief banner, so you notice activity even if the sidebar is closed.
 
 ### 7. Monitor with the admin dashboard (optional)
 
@@ -132,7 +147,7 @@ Open the dashboard from any device that can reach the admin host/port:
 start http://127.0.0.1:8700
 ```
 
-You’ll see live participant counts, current presenter, recent events, and chat messages. For remote access, adjust the `--admin-host` / `--admin-port` arguments on the server command.
+You’ll see live participant counts, current presenter, recent events, chat messages, meeting time remaining, and health status. A lightweight `/api/health` endpoint provides readiness checks for external monitors. Admins can filter participants, download the latest event log, review rolling server logs, set or clear a time limit (the countdown is pushed to every client UI and disconnects participants automatically at expiry), broadcast notices, and initiate a **Stop server & clear files** action that disconnects everyone, purges `server_storage/`, and shuts down every service in order. For remote access, adjust the `--admin-host` / `--admin-port` arguments on the server command.
 
 ### 8. Automate large test sessions (optional)
 
@@ -224,10 +239,11 @@ The executables locate their bundled static assets automatically, so no extra co
 ## Troubleshooting & Tips
 
 - **Heartbeat timeouts:** Run the server with `--log-level debug` and start clients with `--log-level DEBUG` to trace heartbeat send/receive intervals; matching timestamps quickly surface stalled links.
-- **Firewall rules:** Allow inbound UDP/TCP on the configured ports (defaults: TCP `55000`, UDP `56000` series, HTTP `8100` & `8700`).
+- **Firewall rules:** Allow inbound UDP/TCP on the configured ports (defaults: TCP `55000`, UDP `56000` series, UDP `59500` for latency, HTTP `8100` & `8700`).
+- **Pre-shared key mismatch:** If the client immediately drops back to the join screen, double-check the `--pre-shared-key` value on both the server and client CLI.
+- **Auto reconnect:** The client automatically retries with exponential backoff; the UI shows a reconnect banner. Use the Leave button if you want to abort the retry loop.
 - **No video/audio devices:** The video and audio modules degrade gracefully; check logs for hardware warnings.
-- **Rejoining quickly:** Use the Leave button’s cancel countdown if you disconnect accidentally.
-- **File transfer limits:** Large uploads depend on LAN speed; progress updates appear in the status line and File Sharing list.
+- **File transfer limits:** Large uploads depend on LAN speed; progress updates appear in the status line and File Sharing list. Use drag-and-drop for quick multi-file uploads.
 - **Headless environments:** You can run the client without auto-launching a browser by passing `--no-browser` (see `python -m client --help`).
 
 ## Running Tests

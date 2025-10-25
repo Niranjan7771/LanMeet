@@ -77,6 +77,11 @@ main {
   font-weight: 600;
 }
 
+.card .subtext {
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.75);
+}
+
 .panel {
   background: rgba(15, 23, 42, 0.7);
   border: 1px solid rgba(148, 163, 184, 0.25);
@@ -132,9 +137,92 @@ main {
   border-color: rgba(248, 113, 113, 0.55);
 }
 
+.action-button.secondary {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #cbd5f5;
+}
+
+.action-button.secondary:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: rgba(96, 165, 250, 0.6);
+}
+
 .action-hint {
   color: rgba(148, 163, 184, 0.7);
   font-size: 0.85rem;
+}
+
+.control-grid {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.control-card {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 200px;
+}
+
+.control-card h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.form-row.buttons {
+  justify-content: flex-start;
+}
+
+.form-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.form-row input,
+.form-row select,
+.control-card textarea {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #e2e8f0;
+  font-size: 0.95rem;
+  min-width: 0;
+}
+
+.control-card textarea {
+  resize: vertical;
+  min-height: 90px;
+}
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.checkbox input {
+  width: 18px;
+  height: 18px;
 }
 
 .banned-panel {
@@ -172,6 +260,39 @@ main {
 
 .panel header h2 {
   margin: 0 0 12px;
+}
+
+.table-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.toolbar-inputs {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.table-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.table-toolbar input,
+.table-toolbar select {
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  padding: 8px 12px;
+  color: #e2e8f0;
+  min-width: 160px;
 }
 
 .panel table {
@@ -270,6 +391,24 @@ main {
   text-transform: uppercase;
 }
 
+#time-remaining.expired {
+  color: #fecaca;
+}
+
+.log-output {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 14px;
+  padding: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+  font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: #cbd5f5;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 768px) {
   .top-bar {
     flex-direction: column;
@@ -279,5 +418,9 @@ main {
 
   .status-card {
     align-self: flex-start;
+  }
+
+  .table-toolbar {
+    align-items: stretch;
   }
 }
