@@ -135,7 +135,11 @@
             <div id="chat-messages" class="chat-messages"></div>
             <div id="typing-indicator" class="typing-indicator hidden" aria-live="polite"></div>
             <form id="chat-form" class="chat-form">
-              <input type="text" id="chat-input" placeholder="Type a message..." autocomplete="off" />
+              <div class="chat-input-wrapper">
+                <div id="chat-input-overlay" class="chat-input-overlay" aria-hidden="true"></div>
+                <input type="text" id="chat-input" placeholder="Type @ to mention someone..." autocomplete="off" />
+                <div id="mention-popup" class="mention-popup hidden"></div>
+              </div>
               <button type="submit">Send</button>
             </form>
           </div>
@@ -143,10 +147,12 @@
           <!-- Files Tab -->
           <div class="tab-content" id="files-tab">
             <div class="file-upload">
-              <input type="file" id="file-input" />
-              <button id="upload-file">Upload</button>
+              <div class="file-upload-controls">
+                <input type="file" id="file-input" />
+                <button id="upload-file">Upload</button>
+              </div>
+              <p class="drop-hint">Drag & drop files anywhere to upload quickly.</p>
             </div>
-            <p class="drop-hint">Drag & drop files anywhere to upload quickly.</p>
             <ul id="file-list" class="file-list"></ul>
           </div>
         </aside>

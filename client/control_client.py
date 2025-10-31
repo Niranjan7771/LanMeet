@@ -93,14 +93,14 @@ class ControlClient:
         self._send_queue.append(encode_control_message(action, payload))
         self._send_event.set()
 
-    async def send_chat(self, message: str) -> None:
-        await self.send(
-            ControlAction.CHAT_MESSAGE,
-            {
-                "message": message,
-                "timestamp_ms": int(time.time() * 1000),
-            },
-        )
+    async def send_chat(self, message: str, recipients: Optional[list[str]] = None) -> None:
+        payload: Dict[str, object] = {
+            "message": message,
+            "timestamp_ms": int(time.time() * 1000),
+        }
+        if recipients:
+            payload["recipients"] = list(recipients)
+        await self.send(ControlAction.CHAT_MESSAGE, payload)
 
     async def send_typing(self, is_typing: bool) -> None:
         await self.send(

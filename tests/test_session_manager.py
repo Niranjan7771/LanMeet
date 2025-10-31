@@ -109,3 +109,37 @@ async def test_record_admin_notice_logs_event() -> None:
     assert notice["level"] == "warning"
     events = await manager.get_recent_events(limit=5)
     assert any(event["type"] == "admin_notice" for event in events)
+
+
+@pytest.mark.anyio
+async def test_get_chat_history_for_filters_broadcast_and_targeted() -> None:
+    manager = SessionManager()
+    # Register three participants
+    await manager.register("alice", DummyWriter())
+    await manager.register("bob", DummyWriter())
+    await manager.register("carol", DummyWriter())
+
+    # Broadcast from alice to everyone
+    await manager.add_chat_message(ChatMessage(sender="alice", message="hello all", timestamp_ms=1_000))
+    # Targeted from alice to bob
+    await manager.add_chat_message(ChatMessage(sender="alice", message="hi bob", timestamp_ms=2_000, recipients=["bob"]))
+    # Targeted from bob to carol
+    await manager.add_chat_message(ChatMessage(sender="bob", message="psst carol", timestamp_ms=3_000, recipients=["carol"]))
+
+    # alice sees broadcast + her own targeted message
+    a = [m.to_dict() for m in await manager.get_chat_history_for("alice")]
+    assert any(m["message"] == "hello all" for m in a)
+    assert any(m["message"] == "hi bob" for m in a)
+    assert not any(m["message"] == "psst carol" for m in a)
+
+    # bob sees broadcast + message to him + his own message to carol
+    b = [m.to_dict() for m in await manager.get_chat_history_for("bob")]
+    assert any(m["message"] == "hello all" for m in b)
+    assert any(m["message"] == "hi bob" for m in b)
+    assert any(m["message"] == "psst carol" for m in b)
+
+    # carol sees broadcast + message to her
+    c = [m.to_dict() for m in await manager.get_chat_history_for("carol")]
+    assert any(m["message"] == "hello all" for m in c)
+    assert any(m["message"] == "psst carol" for m in c)
+    assert not any(m["message"] == "hi bob" for m in c)

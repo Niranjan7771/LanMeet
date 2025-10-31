@@ -1075,6 +1075,11 @@ class ClientApp:
                 "message": payload.get("message"),
                 "timestamp_ms": payload.get("timestamp_ms"),
             }
+            # Preserve recipients if present (for UI rendering and local snapshot)
+            if isinstance(payload.get("recipients"), list):
+                message["recipients"] = [
+                    str(x).strip() for x in payload.get("recipients") if isinstance(x, str) and str(x).strip()
+                ]
             self._chat_history.append(message)
             if len(self._chat_history) > 200:
                 self._chat_history.pop(0)
@@ -1245,7 +1250,13 @@ class ClientApp:
             if not self._client:
                 return
             message = payload.get("message", "")
-            await self._client.send_chat(message)
+            raw_recipients = payload.get("recipients")
+            recipients: Optional[List[str]] = None
+            if isinstance(raw_recipients, list):
+                recipients = [str(x).strip() for x in raw_recipients if isinstance(x, str) and str(x).strip()]
+                if not recipients:
+                    recipients = None
+            await self._client.send_chat(message, recipients=recipients)
         elif kind == "request_presenter":
             if not self._client:
                 return

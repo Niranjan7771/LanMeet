@@ -174,7 +174,8 @@ class ControlServer:
                         {"username": username, "participants": participants},
                         exclude={username},
                     )
-                    chat_history = [msg.to_dict() for msg in await self._session_manager.get_chat_history()]
+                    # Send chat history filtered for the joining user
+                    chat_history = [msg.to_dict() for msg in await self._session_manager.get_chat_history_for(identity.username)]
                     file_offers = []
                     if self._file_server:
                         file_offers = [offer.to_dict() for offer in await self._file_server.list_files()]
@@ -251,13 +252,30 @@ class ControlServer:
             return
 
         if action == ControlAction.CHAT_MESSAGE:
+            # Normalize recipients if any (list of strings)
+            recipients_raw = payload.get("recipients")
+            recipients: list[str] | None = None
+            if isinstance(recipients_raw, list):
+                recipients = [str(x).strip() for x in recipients_raw if isinstance(x, str) and x.strip()]
+                if not recipients:
+                    recipients = None
+
             chat = ChatMessage.from_dict({
                 "sender": username,
                 "message": payload.get("message", ""),
                 "timestamp_ms": payload.get("timestamp_ms"),
+                "recipients": recipients,
             })
             await self._session_manager.add_chat_message(chat)
-            await self._session_manager.broadcast(ControlAction.CHAT_MESSAGE, chat.to_dict())
+            # Route: broadcast if no recipients; else direct-send to recipients plus sender
+            if not recipients:
+                await self._session_manager.broadcast(ControlAction.CHAT_MESSAGE, chat.to_dict())
+            else:
+                targets = set(recipients)
+                targets.add(username)
+                # Only send to currently connected clients in targets
+                for target in list(targets):
+                    await self._session_manager.send_to(target, ControlAction.CHAT_MESSAGE, chat.to_dict())
             return
 
         if action == ControlAction.PRESENTER_GRANTED:

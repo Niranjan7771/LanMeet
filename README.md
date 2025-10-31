@@ -15,6 +15,29 @@ The LAN Collaboration Suite delivers real-time audio, video, screen sharing, cha
 | **File transfers** | Supports multiple simultaneous uploads, resumable chunks, drag-and-drop uploads, and direct browser downloads/share links. |
 | **Security options** | Operates entirely on a trusted LAN/VPN; pair with your own network controls or gateways as needed. |
 | **Operational tooling** | Admin dashboard shows connected users, presenter status, chat log, recent events, and health metrics; configure meeting time limits, broadcast notices, latency summaries, storage usage, tail live server logs, and trigger a single-click shutdown that disconnects participants and clears temporary files before services exit. |
+| **@ Mention Chat** | Discord-style inline mentions let you target specific participants by typing `@username`. Mentioned users receive notifications and see highlighted messages, while broadcast messages (without mentions) reach everyone silently. |
+
+## Chat Features
+
+### @ Mention System
+
+The chat includes a Discord-inspired mention system for targeted messaging:
+
+- **Type `@` to trigger autocomplete**: Start typing `@` followed by a participant's name to see matching suggestions in a popup menu.
+- **Navigate with keyboard**: Use arrow keys to select a participant, then press `Enter` or `Tab` to insert the mention.
+- **Mention multiple people**: Type multiple `@username` mentions in a single message to notify several participants.
+- **Visual highlighting**: Mentioned usernames appear in blue within messages, and messages mentioning you have a yellow accent border.
+- **Inline chips**: Mentions render as pill-shaped highlights while typing and glow when inserted from the picker.
+- **Duplicate guard**: Selecting someone twice flashes the existing chip instead of adding a second `@username` in the message text.
+- **Smart notifications**: Only mentioned users receive notifications. Messages without mentions are broadcast to everyone silently.
+- **Flexible targeting**: Send to specific individuals with mentions, or broadcast to all by sending a message without any mentions.
+
+**Examples:**
+- `@Alice Can you review the design?` → Only Alice is notified
+- `@Bob @Charlie Let's discuss this offline` → Bob and Charlie are notified
+- `Meeting starts in 5 minutes` → Everyone sees it, but no notifications are sent
+
+This approach keeps the chat natural and flexible, allowing you to control who gets alerted without disrupting the conversation flow.
 
 ## Project Structure
 
@@ -130,6 +153,17 @@ If the admin kicks a participant or they leave through the UI, the accompanying 
 
 The UI persists session state across page refreshes—chat history, presenter, files, media toggles, and reactions are restored automatically. Live presence keeps the participant list updated with avatars, hand status, typing indicators, and per-user latency badges. Drag-and-drop files anywhere in the window to upload without touching the file picker. Hotkeys (`M` mic, `V` video, `P` present, `H` hand, `R` reactions) provide quick control.
 Unread chat messages and newly shared files raise subtle badges on the chat toggle and tabs, along with a brief banner, so you notice activity even if the sidebar is closed.
+
+### Selective and group chat
+
+By default, chat messages are sent to everyone. To send a private or group message:
+
+- Open the Chat sidebar and use the recipients selector to choose one or more participants.
+- Leave the selector on “Everyone” to broadcast to all participants.
+- Targeted messages appear with a small “to Alice, Bob” badge next to the sender and time.
+- Only the sender and chosen recipients receive and see a targeted message; other participants do not.
+
+When you join a meeting, your chat history contains broadcast messages and any targeted messages you sent or received.
 
 ### 7. Monitor with the admin dashboard (optional)
 

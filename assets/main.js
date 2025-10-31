@@ -2,7 +2,9 @@ const statusEl = document.getElementById("status");
 const chatMessagesEl = document.getElementById("chat-messages");
 const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
+const chatInputOverlay = document.getElementById("chat-input-overlay");
 const participantListEl = document.getElementById("participant-list");
+const mentionPopup = document.getElementById("mention-popup");
 const fileListEl = document.getElementById("file-list");
 const uploadButton = document.getElementById("upload-file");
 const fileInput = document.getElementById("file-input");
@@ -113,6 +115,12 @@ let filesUnreadCount = 0;
 let chatToggleBadgeEl = null;
 let chatTabBadgeEl = null;
 let filesTabBadgeEl = null;
+
+// Mention autocomplete state
+let mentionStartPos = -1;
+let mentionQuery = "";
+let mentionSelectedIndex = -1;
+let mentionMatches = [];
 
 const TYPING_DEBOUNCE_MS = 250;
 const TYPING_IDLE_TIMEOUT_MS = 3500;
@@ -828,6 +836,344 @@ function handleDrop(event) {
 
 let videoWatchdogTimerId = null;
 
+function escapeHtml(text) {
+  if (text === null || text === undefined) {
+    return "";
+  }
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderChatInputOverlay(value) {
+  if (!chatInputOverlay) {
+    return;
+  }
+
+  const placeholderText = chatInput ? chatInput.getAttribute("placeholder") || "" : "";
+  const safeValue = typeof value === "string" ? value : "";
+
+  if (!safeValue) {
+    if (placeholderText) {
+      chatInputOverlay.textContent = placeholderText;
+      chatInputOverlay.classList.add("placeholder");
+    } else {
+      chatInputOverlay.innerHTML = "&nbsp;";
+      chatInputOverlay.classList.remove("placeholder");
+    }
+    return;
+  }
+
+  chatInputOverlay.classList.remove("placeholder");
+  const mentionRegex = /@([A-Za-z0-9_-]+)/g;
+  let lastIndex = 0;
+  let result = "";
+  let match;
+
+  while ((match = mentionRegex.exec(safeValue)) !== null) {
+    result += escapeHtml(safeValue.slice(lastIndex, match.index));
+    const mentionValue = escapeHtml(match[1]);
+    const mentionText = escapeHtml(match[0]);
+    result += `<span class="mention-token" data-mention="${mentionValue}">${mentionText}</span>`;
+    lastIndex = mentionRegex.lastIndex;
+  }
+
+  result += escapeHtml(safeValue.slice(lastIndex));
+  chatInputOverlay.innerHTML = result || "&nbsp;";
+}
+
+function flashMentionToken(username) {
+  if (!chatInputOverlay || !username) {
+    return;
+  }
+  const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(username) : username.replace(/["\\]/g, "\\$&");
+  const tokens = chatInputOverlay.querySelectorAll(`[data-mention="${escaped}"]`);
+  tokens.forEach((token) => {
+    token.classList.remove("flash");
+    // Force reflow so the animation retriggers
+    void token.offsetWidth;
+    token.classList.add("flash");
+  });
+}
+
+// ===================== Mention Autocomplete Functions =====================
+
+function handleChatInputChange(event) {
+  if (!chatInput || !mentionPopup) {
+    return;
+  }
+
+  const input = event.target;
+  const text = input.value;
+  const cursorPos = input.selectionStart ?? text.length;
+
+  renderChatInputOverlay(text);
+
+  // Find the last @ before the cursor
+  const textBeforeCursor = text.substring(0, cursorPos);
+  const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+
+  if (lastAtIndex === -1) {
+    // No @ found, hide popup
+    hideMentionPopup();
+    return;
+  }
+
+  // Ensure @ is at start or preceded by whitespace / punctuation (avoid emails)
+  const charBeforeAt = lastAtIndex > 0 ? textBeforeCursor.charAt(lastAtIndex - 1) : '';
+  if (charBeforeAt && /[\w@]/.test(charBeforeAt)) {
+    hideMentionPopup();
+    return;
+  }
+
+  // Check if there's a space between @ and cursor (means mention was completed)
+  const textAfterAt = textBeforeCursor.substring(lastAtIndex);
+  if (textAfterAt.includes(' ') && textAfterAt.length > 1) {
+    hideMentionPopup();
+    return;
+  }
+
+  // Extract the query (text after @)
+  const query = textBeforeCursor.substring(lastAtIndex + 1);
+
+  // Show popup with filtered participants
+  mentionStartPos = lastAtIndex;
+  mentionQuery = query;
+  showMentionPopup(query);
+}
+
+function handleChatInputKeydown(event) {
+  if (!mentionPopup || !mentionPopup.classList.contains('visible')) {
+    return;
+  }
+
+  switch (event.key) {
+    case 'ArrowDown':
+      event.preventDefault();
+      if (mentionSelectedIndex < mentionMatches.length - 1) {
+        mentionSelectedIndex++;
+        updateMentionSelection();
+      }
+      break;
+
+    case 'ArrowUp':
+      event.preventDefault();
+      if (mentionSelectedIndex > 0) {
+        mentionSelectedIndex--;
+        updateMentionSelection();
+      }
+      break;
+
+    case 'Enter':
+      event.preventDefault();
+      if (mentionSelectedIndex >= 0 && mentionSelectedIndex < mentionMatches.length) {
+        insertMention(mentionMatches[mentionSelectedIndex]);
+      }
+      break;
+
+    case 'Escape':
+      event.preventDefault();
+      hideMentionPopup();
+      break;
+
+    case 'Tab':
+      // Allow tab to select if popup is open
+      if (mentionSelectedIndex >= 0 && mentionSelectedIndex < mentionMatches.length) {
+        event.preventDefault();
+        insertMention(mentionMatches[mentionSelectedIndex]);
+      }
+      break;
+  }
+}
+
+function showMentionPopup(query) {
+  if (!mentionPopup) {
+    return;
+  }
+
+  const candidateList = Array.from(
+    participants instanceof Set
+      ? participants
+      : Array.isArray(participants)
+      ? participants
+      : []
+  ).filter((name) => typeof name === 'string' && name.trim().length > 0);
+
+  // Exclude current user from suggestions
+  const filteredCandidates = candidateList.filter((name) => name !== currentUsername);
+
+  if (filteredCandidates.length === 0) {
+    mentionPopup.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'mention-empty';
+    empty.textContent = 'No other participants to mention yet';
+    mentionPopup.appendChild(empty);
+    mentionPopup.classList.remove('hidden');
+    mentionPopup.classList.add('visible');
+    mentionMatches = [];
+    mentionSelectedIndex = -1;
+    return;
+  }
+
+  const lowerQuery = (query || '').toLowerCase();
+  const sortedCandidates = filteredCandidates
+    .slice()
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+  // Filter participants by query (case-insensitive)
+  mentionMatches = sortedCandidates.filter((name) =>
+    name.toLowerCase().startsWith(lowerQuery)
+  );
+
+  if (mentionMatches.length === 0) {
+    mentionPopup.innerHTML = '';
+    const empty = document.createElement('div');
+    empty.className = 'mention-empty';
+    empty.textContent = query ? `No matches for "@${query}"` : 'No participants match this search';
+    mentionPopup.appendChild(empty);
+    mentionPopup.classList.remove('hidden');
+    mentionPopup.classList.add('visible');
+    mentionMatches = [];
+    mentionSelectedIndex = -1;
+    return;
+  }
+
+  // Reset selection to first item
+  mentionSelectedIndex = 0;
+
+  // Clear and populate popup
+  mentionPopup.innerHTML = '';
+
+  mentionMatches.forEach((username, index) => {
+    const item = document.createElement('div');
+    item.className = 'mention-item';
+    if (index === mentionSelectedIndex) {
+      item.classList.add('selected');
+    }
+
+    // Create avatar with gradient background
+    const avatar = document.createElement('div');
+    avatar.className = 'mention-avatar';
+    avatar.textContent = username.charAt(0).toUpperCase();
+
+    // Create username text
+    const usernameEl = document.createElement('span');
+    usernameEl.className = 'mention-username';
+    usernameEl.textContent = username;
+
+    item.appendChild(avatar);
+    item.appendChild(usernameEl);
+
+    // Click handler
+    item.addEventListener('click', () => {
+      insertMention(username);
+    });
+
+    mentionPopup.appendChild(item);
+  });
+
+  mentionPopup.classList.remove('hidden');
+  mentionPopup.classList.add('visible');
+}
+
+function hideMentionPopup() {
+  if (!mentionPopup) {
+    return;
+  }
+  mentionPopup.classList.add('hidden');
+  mentionPopup.classList.remove('visible');
+  mentionPopup.innerHTML = '';
+  mentionStartPos = -1;
+  mentionQuery = '';
+  mentionSelectedIndex = -1;
+  mentionMatches = [];
+}
+
+function updateMentionSelection() {
+  if (!mentionPopup) {
+    return;
+  }
+  const items = mentionPopup.querySelectorAll('.mention-item');
+  items.forEach((item, index) => {
+    if (index === mentionSelectedIndex) {
+      item.classList.add('selected');
+      // Scroll into view if needed
+      item.scrollIntoView({ block: 'nearest' });
+    } else {
+      item.classList.remove('selected');
+    }
+  });
+}
+
+function insertMention(username) {
+  if (!chatInput) {
+    return;
+  }
+
+  const currentValue = chatInput.value;
+  const beforeMention = currentValue.substring(0, Math.max(0, mentionStartPos));
+  const afterMention = currentValue.substring(chatInput.selectionStart ?? currentValue.length);
+  const existingMentions = parseMentions(currentValue);
+
+  if (existingMentions.includes(username)) {
+    const dedupedValue = beforeMention + afterMention;
+    chatInput.value = dedupedValue;
+    renderChatInputOverlay(chatInput.value);
+    flashMentionToken(username);
+    hideMentionPopup();
+    const fallbackPos = beforeMention.length;
+    chatInput.setSelectionRange(fallbackPos, fallbackPos);
+    chatInput.focus();
+    return;
+  }
+
+  // Insert @username with a space after
+  const mentionText = `@${username} `;
+  const newValue = beforeMention + mentionText + afterMention;
+  chatInput.value = newValue;
+
+  // Set cursor position after the inserted mention
+  const newCursorPos = beforeMention.length + mentionText.length;
+  chatInput.setSelectionRange(newCursorPos, newCursorPos);
+
+  // Hide popup and reset state
+  hideMentionPopup();
+  renderChatInputOverlay(chatInput.value);
+  flashMentionToken(username);
+
+  // Focus back on input
+  chatInput.focus();
+}
+
+function parseMentions(text) {
+  // Extract all @username patterns from text
+  // Matches @ followed by allowed characters (letters, numbers, underscore, hyphen)
+  const mentionRegex = /@([A-Za-z0-9_-]+)/g;
+  const mentions = [];
+  let match;
+
+  const source = typeof text === "string" ? text : "";
+
+  const participantSet =
+    participants instanceof Set
+      ? participants
+      : new Set(Array.isArray(participants) ? participants : []);
+
+  while ((match = mentionRegex.exec(source)) !== null) {
+    const username = match[1];
+    if (participantSet.has(username) && !mentions.includes(username)) {
+      mentions.push(username);
+    }
+  }
+
+  return mentions;
+}
+
+// ===================== End Mention Autocomplete Functions =====================
+
 function init() {
   setConnectedUi(false);
   setJoinFormEnabled(false);
@@ -887,15 +1233,14 @@ function init() {
   document.addEventListener("keydown", handleGlobalKeydown);
 
   if (chatInput) {
-    chatInput.addEventListener("input", () => {
-      requestTypingStart();
-    });
-    chatInput.addEventListener("keydown", () => {
-      requestTypingStart();
-    });
+    chatInput.addEventListener("input", handleChatInputChange);
+    chatInput.addEventListener("keydown", handleChatInputKeydown);
     chatInput.addEventListener("blur", () => {
       resetTypingState();
+      // Delay hiding mention popup to allow click
+      setTimeout(() => hideMentionPopup(), 200);
     });
+    renderChatInputOverlay(chatInput.value || "");
   }
 
   document.addEventListener("dragenter", handleDragEnter);
@@ -1885,19 +2230,90 @@ function handleStateSnapshot(snapshot) {
   updateParticipantSummary();
 }
 
-function appendChatMessage({ sender, message, timestamp_ms }) {
+function appendChatMessage({ sender, message, timestamp_ms, recipients }) {
   const item = document.createElement("div");
   item.className = "chat-message";
+  item.style.animation = "slideInMessage 0.3s ease";
+  
+  // Check if current user is mentioned
+  const mentions = parseMentions(message);
+  const currentUserMentioned = mentions.includes(currentUsername);
+  if (currentUserMentioned) {
+    item.classList.add('has-mention');
+  }
+  
   const meta = document.createElement("div");
   meta.className = "meta";
+  
+  const senderSpan = document.createElement("span");
+  senderSpan.className = "sender";
+  senderSpan.textContent = sender;
+  
+  const timeSpan = document.createElement("span");
+  timeSpan.className = "time";
   const date = timestamp_ms ? new Date(timestamp_ms) : new Date();
-  meta.textContent = `${sender} • ${date.toLocaleTimeString()}`;
+  timeSpan.textContent = date.toLocaleTimeString();
+  
+  meta.appendChild(senderSpan);
+  meta.appendChild(document.createTextNode(" • "));
+  meta.appendChild(timeSpan);
+  
+  // Add mention badge if current user is mentioned
+  if (currentUserMentioned) {
+    const mentionBadge = document.createElement("span");
+    mentionBadge.className = "mention-badge";
+    mentionBadge.textContent = "You were mentioned";
+    meta.appendChild(mentionBadge);
+  }
+  
+  if (Array.isArray(recipients) && recipients.length > 0) {
+    const badge = document.createElement("span");
+    badge.className = "recipients-badge";
+    const displayList = recipients.join(", ");
+    badge.textContent = `to ${displayList}`;
+    meta.appendChild(badge);
+  }
+  
   const body = document.createElement("div");
-  body.textContent = message;
+  body.className = "body";
+  
+  // Render message with highlighted @mentions
+  const mentionRegex = /@([A-Za-z0-9_-]+)/g;
+  let lastIndex = 0;
+  let match;
+  
+  while ((match = mentionRegex.exec(message)) !== null) {
+    const username = match[1];
+    const matchStart = match.index;
+    const matchEnd = mentionRegex.lastIndex;
+    
+    // Add text before the mention
+    if (matchStart > lastIndex) {
+      body.appendChild(document.createTextNode(message.substring(lastIndex, matchStart)));
+    }
+    
+    // Add the mention as a styled span
+    const mentionSpan = document.createElement('span');
+    mentionSpan.className = 'mention';
+    mentionSpan.textContent = match[0];
+    body.appendChild(mentionSpan);
+    
+    lastIndex = matchEnd;
+  }
+  
+  // Add remaining text after last mention
+  if (lastIndex < message.length) {
+    body.appendChild(document.createTextNode(message.substring(lastIndex)));
+  }
+  
   item.append(meta, body);
   chatMessagesEl.appendChild(item);
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-  handleChatNotification(sender);
+  
+  // Only notify if current user is mentioned (not just a recipient)
+  if (currentUserMentioned && sender !== currentUsername) {
+    handleChatNotification(sender);
+  }
 }
 
 function sortParticipantEntries(entries) {
@@ -2172,16 +2588,23 @@ function renderFiles() {
   fileListEl.innerHTML = "";
   Array.from(files.entries()).forEach(([id, file]) => {
     const li = document.createElement("li");
-    li.className = "file-entry";
 
-    const meta = document.createElement("div");
-    meta.className = "file-meta";
+    const fileInfo = document.createElement("div");
+    fileInfo.className = "file-info";
 
-    const nameSpan = document.createElement("span");
+    const fileNameContainer = document.createElement("div");
+    fileNameContainer.style.flex = "1";
+
+    const nameSpan = document.createElement("div");
+    nameSpan.className = "file-name";
     nameSpan.textContent = file.filename || id;
-    meta.appendChild(nameSpan);
+    fileNameContainer.appendChild(nameSpan);
 
-    const detailSpan = document.createElement("span");
+    const fileMeta = document.createElement("div");
+    fileMeta.className = "file-meta";
+
+    const sizeSpan = document.createElement("div");
+    sizeSpan.className = "file-size";
     const totalSize = file.total_size || file.size;
     const sizeText = typeof totalSize === "number" ? formatBytes(totalSize) : "Unknown";
     let detailText = sizeText;
@@ -2189,27 +2612,38 @@ function renderFiles() {
       const progress = Math.min(100, Math.max(0, Math.round((file.received / file.total_size) * 100)));
       detailText = `${sizeText} • ${progress}%`;
     }
-    detailSpan.textContent = detailText;
-    meta.appendChild(detailSpan);
+    sizeSpan.textContent = detailText;
+    fileMeta.appendChild(sizeSpan);
+
+    if (file.uploader) {
+      const uploaderSpan = document.createElement("div");
+      uploaderSpan.className = "file-uploader";
+      uploaderSpan.textContent = `Shared by ${file.uploader}`;
+      fileMeta.appendChild(uploaderSpan);
+    }
+
+    fileNameContainer.appendChild(fileMeta);
+    fileInfo.appendChild(fileNameContainer);
 
     const actions = document.createElement("div");
     actions.className = "file-actions";
 
     const downloadBtn = document.createElement("button");
     downloadBtn.type = "button";
-    downloadBtn.textContent = "⬇️";
-    downloadBtn.title = "Download";
+    downloadBtn.textContent = "Download";
+    downloadBtn.title = "Download file";
     downloadBtn.addEventListener("click", () => requestFileDownload(id));
     actions.appendChild(downloadBtn);
 
     const shareBtn = document.createElement("button");
     shareBtn.type = "button";
-    shareBtn.textContent = "🔗";
+    shareBtn.className = "secondary";
+    shareBtn.textContent = "Copy Link";
     shareBtn.title = "Copy share link";
     shareBtn.addEventListener("click", () => requestShareLink(id));
     actions.appendChild(shareBtn);
 
-    li.append(meta, actions);
+    li.append(fileInfo, actions);
     fileListEl.appendChild(li);
   });
 }
@@ -2511,8 +2945,20 @@ chatForm.addEventListener("submit", (event) => {
   if (!joined) return;
   const message = chatInput.value.trim();
   if (!message) return;
-  sendControl("chat_send", { message });
+  
+  // Extract mentions from the message
+  const mentions = parseMentions(message);
+  
+  // If there are mentions, send to those users; otherwise send to all
+  const payload = mentions.length > 0 ? { message, recipients: mentions } : { message };
+  
+  sendControl("chat_send", payload);
   chatInput.value = "";
+  renderChatInputOverlay("");
+  
+  // Hide mention popup if still visible
+  hideMentionPopup();
+  
   resetTypingState();
 });
 

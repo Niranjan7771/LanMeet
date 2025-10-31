@@ -1,144 +1,281 @@
-# LAN Collaboration Suite Architecture
+# LAN Collaboration Suite Technical Reference
 
-This document provides an in-depth look at the LAN Collaboration Suite. It explains how the platform is assembled, how traffic flows between components, and which operational guarantees are offered when the system is deployed on a local network. The goal is to equip operators and contributors with a mental model that covers both day-to-day usage and the reasoning behind critical design decisions.
+This document rebuilds the project documentation from the ground up. It enumerates every functional requirement, maps each capability to the concrete Python and JavaScript symbols that implement it, and highlights operational details down to the “teeny tiny” UX flourishes—such as inline @ mentions, duplicate guards, and status badges.
 
-## 1. Conceptual Overview
+## 1. Requirements & Feature Traceability
 
-At its core the suite follows a hub-and-spoke design. One process acts as the authoritative server while every participant runs a lightweight client that bridges their browser UI with local audio, video, and screen sharing capabilities. No public cloud is required; every packet remains inside the LAN or VPN selected by the operator.
+| Requirement | Implementation Highlights |
+|-------------|---------------------------|
+| Real-time video conferencing | `server/video_server.py` (UDP relay), `client/video_client.py` (capture/receive), `assets/main.js` (`ensureVideoTile`, `renderVideoFrame`). |
+| Real-time audio conferencing | `server/audio_server.py` (mix loop), `client/audio_client.py` (capture/playback), presence badges in `assets/main.js` (`updatePeerMedia`). |
+| Screen sharing with presenter control | `server/screen_server.py`, `client/screen_client.py::ScreenPublisher`, UI toggles in `assets/main.js` (`togglePresent`, `updateStagePresenterState`). |
+| Group chat with Discord-style mentions | Control plane via `server/control_server.py`, chat persistence in `server/session_manager.py::add_chat_message`, inline mention system in `assets/main.js` (`handleChatInputChange`, `renderChatInputOverlay`, `insertMention`, `parseMentions`). |
+| File upload/download | `server/file_server.py`, `client/file_client.py`, drag-and-drop UX in `assets/main.js` (`handleDrop`, `uploadFilesSequentially`). |
+| Presence, reactions, hand raise, typing indicators | `session_manager.py` presence payloads, `control_server.py::_handle_message`, `assets/main.js` (`updatePresenceEntry`, `handleReactionSelection`). |
+| Latency monitoring | `server/latency_server.py`, `client/app.py::LatencyProbe`, latency badge styling in `assets/styles.css`. |
+| Administrative controls | REST API in `server/admin_dashboard.py`, front-end assets under `adminui/`, shutdown orchestration in `session_manager.py::disconnect_all`. |
+| Deployment deliverables | PyInstaller specs under `build/spec/`, automation script `scripts/build_executables.py`. |
+
+## 2. Runtime Topology & Transports
 
 ```
-                +-------------------------+
-                |         Browser UI       |
-                +-------------+-----------+
-                              |
-                              | HTTP / WebSocket (loopback)
-                              v
-  +---------------------------+---------------------------+
-  |                   Client Runtime                      |
-  |  - Control channel over TCP                           |
-  |  - UDP media capture / playback                       |
-  |  - Local file cache                                   |
-  +---------------------------+---------------------------+
-                              |
-                              | LAN sockets
-                              v
-                   +----------+-----------+
-                   |     Collaboration    |
-                   |        Server        |
-                   +----------------------+ 
+                                +-------------------------+
+                                |        Browser UI       |
+                                +-------------+-----------+
+                                                            |
+                                                            | HTTP / WebSocket (loopback)
+                                                            v
+    +---------------------------+---------------------------+
+    |                   Client Runtime                      |
+    |  - FastAPI app (`client/app.py`)                      |
+    |  - Media capture (audio/video/screen)                 |
+    |  - File transfer helper                               |
+    +---------------------------+---------------------------+
+                                                            |
+                                                            | LAN sockets (TCP/UDP)
+                                                            v
+                                     +----------+-----------+
+                                     |     Collaboration    |
+                                     |        Server        |
+                                     +----------------------+ 
 ```
 
-The server is responsible for session orchestration, state storage, and media relays. Clients focus on capturing local media, subscribing to server broadcasts, and reflecting state transitions in their embedded browser UI. Because every client bundles its own HTTP server, the user experience remains consistent across desktop environments.
+| Channel | Transport | Source -> Destination | Key Symbols |
+|---------|-----------|----------------------|-------------|
+| Control & chat | TCP | `client/control_client.py` <-> `server/control_server.py` | `ControlAction` enum, `SessionManager.broadcast()` |
+| Audio | UDP | `AudioClient` <-> `AudioServer` | `MediaFrameHeader`, `_mix_loop()` |
+| Video | UDP | `VideoClient` <-> `VideoServer` | `stream_id_for()`, `VideoServer.datagram_received()` |
+| Screen sharing | TCP | `ScreenPublisher` -> `ScreenServer` -> viewers | `_read_frame()`, `ControlAction.SCREEN_FRAME` |
+| Files | TCP | `FileClient` <-> `FileServer` | `_handle_upload()`, `_handle_download()` |
+| Latency probes | UDP | `LatencyProbe` <-> `LatencyServer` | `_LatencyProtocol`, `LatencyProbe._send_probe()` |
+| UI bridge | Loopback WebSocket | Browser <-> `ClientApp.WebSocketHub` | `WebSocketHub.broadcast()` |
 
-## 2. End-to-End Flow
+Reliability design:
+- TCP channels guarantee ordering for chat, files, and screen control. Backpressure is absorbed by asyncio streams.
+- UDP media deliberately trades reliability for latency. Each client has local jitter buffers (`AudioClient._play_queue`, `VideoClient._peers`).
+- The UI stays responsive during control drops because static assets come from the local FastAPI server.
 
-1. **Startup**: The operator launches the server process specifying control and admin ports. Each client is started with the server address and optional UI port.
-2. **Handshake**: A client opens the TCP control socket, announces its identity, and retrieves chat history, presence information, media configuration, and any active time limit.
-3. **Media Joining**: When a participant toggles microphone, camera, or screen sharing, the client negotiates UDP or TCP streams and the server propagates status updates to other attendees.
-4. **Administration**: The admin dashboard communicates with the server over HTTP to retrieve snapshots, kick participants, adjust meeting limits, and initiate shutdown.
-5. **Teardown**: During shutdown the server disconnects participants, stops every media service, clears `server_storage/`, and finally terminates the admin API.
+## 3. Control & Media Flows
 
-## 3. Communication Channels
+### 3.1 Join Sequence
+1. Browser loads assets from the embedded client server (`ClientApp._configure_routes`).
+2. `ControlClient.connect()` opens TCP, sends `HELLO`, and waits for `ControlAction.WELCOME`.
+3. `ControlServer._handle_client()` registers the username via `SessionManager.register()` and replies with chat history, presence, files, media config, and time limit state.
+4. `ClientApp` starts media helpers (`VideoClient`, `AudioClient`, `ScreenPublisher`) on demand and schedules heartbeats/latency probes.
 
-Each capability is delivered through a dedicated transport. Channels are intentionally isolated to keep media pipelines predictable and to make troubleshooting straightforward.
+### 3.2 Media Lifecycle
+- **Audio**: `AudioClient.set_capture_enabled()` toggles microphone capture. Frames reach `AudioServer.datagram_received()`, are queued per user, and `_mix_loop()` sends mixed streams back.
+- **Video**: `VideoClient._capture_loop()` encodes JPEG frames, sends them, and replays them locally so the UI shows instant feedback. Peers are tracked with `VideoClient.update_peers()`.
+- **Screen sharing**: `ScreenPublisher.start()` opens a TCP stream, sends metadata, and pushes JPEG frames. `ScreenServer` broadcasts `SCREEN_CONTROL` and `SCREEN_FRAME` events through the control plane.
 
-| Feature                | Transport | Direction        | Purpose |
-|------------------------|-----------|------------------|---------|
-| Audio conferencing     | UDP       | Client <-> Server | Streams PCM frames captured locally; server forwards to subscribers after optional mixing. |
-| Video conferencing     | UDP       | Client <-> Server | Sends JPEG frames with timestamps; server relays to viewers and records throughput metrics. |
-| Screen or slide sharing| TCP       | Presenter -> Server -> Viewers | Delivers PNG frames with guaranteed ordering so text and cursor updates remain crisp. |
-| Group chat             | TCP       | Client <-> Server | Uses length-prefixed JSON messages to keep ordering and delivery guarantees. |
-| File sharing           | TCP       | Client <-> Server | Handles chunked uploads, metadata events, and download requests. |
-| Control signalling     | TCP       | Client <-> Server | Coordinates user presence, presenter assignment, media toggles, reactions, and administrative notices. |
-| Heartbeat telemetry    | TCP       | Client -> Server  | Emits periodic markers so the server can spot stalled control links and trigger reconnect flows. |
-| Latency probe service  | UDP       | Client <-> Server | Sends timestamped echo packets; operators can restrict access with firewall rules when required. |
-| UI bridge              | WebSocket (loopback) | Browser <-> Client runtime | Connects the embedded Vue/Vanilla JS UI with the Python runtime that executes LAN traffic. |
+### 3.3 Chat & Mentions
+- `assets/main.js` maintains chat state and callouts. Core mention helpers:
+    - `handleChatInputChange()` detects `@` sequences, filters matches, and renders the autocomplete list.
+    - `renderChatInputOverlay()` mirrors the raw input with inline `<span class="mention-token">` chips.
+    - `insertMention()` injects the mention text, prevents duplicates via `parseMentions()`, and triggers `flashMentionToken()` animation.
+    - `parseMentions()` accepts alphanumeric, underscore, and hyphenated usernames and cross-checks `participants` to avoid stray tokens.
+- Submitted messages go through `ControlClient.send_chat()`, with targeted delivery handled by `ControlServer._handle_message()`.
 
-### Reliability Considerations
+### 3.4 Files
+- Drag-and-drop in `assets/main.js` (`handleDragEnter`, `handleDrop`) funnels into `FileClient.upload()`.
+- `FileServer._handle_upload()` writes streaming chunks using `aiofiles`, updates progress via `ControlAction.FILE_PROGRESS`, and advertises completed offers (`FILE_OFFER`).
+- Downloads stream chunk-by-chunk (`FileClient.download()` yields an `AsyncIterator`).
 
-- **TCP channels** (control, chat, file transfer, screen sharing) are backpressure-aware and tolerate transient congestion while maintaining ordering.
-- **UDP media** (audio, video, latency probes) prioritizes low latency. Packet loss is expected and handled with jitter buffers or lightweight error concealment.
-- **Loopback HTTP/WebSocket** ensures the browser UI does not depend on the main server for asset hosting. If the control channel drops the UI can still display reconnect status.
+### 3.5 Administrative Controls
+- `AdminDashboard` mounts the static admin UI and exposes JSON endpoints (`/api/state`, `/api/actions/kick`, `/api/actions/time-limit`).
+- Snapshot responses delegate to `SessionManager.snapshot()`, which collates presence, chat history, events, latency stats, and shutdown status.
+- Time limits rely on `SessionManager.set_time_limit()` and `get_time_limit_status()`. Client enforcement lives in `ClientApp._maybe_schedule_time_limit_leave()`.
 
-## 4. Core Modules
+## 4. Module & Function Inventory
 
-### 4.1 Session Core (`shared/`, `server/session_manager.py`)
-- Maintains the authoritative registry of participants, including presence attributes (audio/video flags, hand raise status, typing indicators, latency metrics).
-- Emits broadcasts through helper methods so higher level services can focus on their domain logic.
-- Persists event logs (join, leave, kick, notice, time limit changes) and exposes snapshots to the admin API.
-- Provides `disconnect_all` and `mark_shutdown_requested` to guarantee a coherent shutdown story.
+### 4.1 Shared Layer (`shared/`)
 
-### 4.2 Control Server (`server/control_server.py`)
-- Exposes the TCP control socket and performs the HELLO handshake.
-- Rejects duplicate usernames, tracks banned users, and coordinates presenter transitions.
-- Bridges chat messages, reactions, and presence deltas to all participants.
-- Invokes `force_disconnect` when the admin dashboard removes a user.
+| Symbol | Responsibility | Notes |
+|--------|----------------|-------|
+| `ControlAction` | Enum of TCP control opcodes. | Used everywhere a control message is dispatched. |
+| `ChatMessage` | Dataclass with `from_dict()/to_dict()` helpers. | Used by `SessionManager.add_chat_message()` and tests. |
+| `ClientIdentity` | Represents HELLO payload. | Carries optional pre-shared key for secured deployments. |
+| `MediaFrameHeader` / `MEDIA_HEADER_STRUCT` | Packed header for UDP frames. | Shared by audio and video paths. |
+| `FileOffer` | Dataclass for sharing file metadata. | Broadcast after successful uploads. |
+| `resource_paths.resolve_path()` | Locates packaged assets (admin UI, storage). | Keeps PyInstaller builds working. |
 
-### 4.3 Media Services
-- **Audio Server**: Manages UDP sockets per participant, mixes active speakers, and publishes mixdowns.
-- **Video Server**: Relays video frames; can be extended with transcoding if bandwidth shaping is required later.
-- **Screen Server**: Accepts PNG frames from a single presenter at a time, relays them to viewers, and controls access when presenters switch.
-- **Latency Server**: Replies to timestamped probes; results feed presence overlays in the UI.
+### 4.2 Session Management (`server/session_manager.py`)
 
-### 4.4 File Server (`server/file_server.py`)
-- Accepts chunked uploads and stores them in `server_storage/`.
-- Maintains in-memory metadata to drive file offer broadcasts.
-- Cleans up storage on demand or during shutdown using the asynchronous purge routine.
+| Category | Key Functions | Behaviour |
+|----------|---------------|-----------|
+| Registration & lifecycle | `register()`, `unregister()`, `disconnect_all()`, `ban_user()`, `unban_user()`, `list_clients()` | Manage the authorative client registry, enforce bans, and broadcast join/leave events. |
+| Presence tracking | `_client_presence_payload()`, `get_presence_entry()`, `get_presence_snapshot()`, `snapshot()` | Produce data consumed by UI badges, admin dashboard, and mention autocomplete (`participants` list). |
+| Media state | `update_media_state()`, `get_media_state_snapshot()` | Synchronize audio/video toggles across participants. |
+| Chat & reactions | `add_chat_message()`, `get_chat_history()`, `get_chat_history_for()` | Persist the last 200 messages and filter by recipient for targeted chats. |
+| Typing, hands, latency | `set_typing()`, `set_hand_status()`, `update_latency()` | Feed presence overlays and highlight cues (typing banner, raise-hand icon, latency badge). |
+| Heartbeats | `mark_heartbeat()`, `heartbeat_watcher()` | Detect stalled control connections, prune stale entries, and broadcast forced leaves. |
+| Time limits | `set_time_limit()`, `get_time_limit_status()`, `_build_time_limit_status_locked()` | Drive meeting countdowns and forced eject when the limit expires. |
+| Admin utilities | `mark_shutdown_requested()`, `record_admin_notice()`, `get_recent_events()`, `record_blocked_attempt()` | Provide observability and enforce admin-initiated actions. |
 
-### 4.5 Admin Dashboard (`server/admin_dashboard.py`, `adminui/`)
-- Provides the HTML/JS single-page app plus JSON endpoints for state snapshots, notices, kicks, time limit adjustments, and shutdown.
-- Caches storage stats and log-tail data for quick refreshes.
-- Returns explicit status codes when shutdown is already in progress so operators avoid duplicate requests.
+Helper: `_calculate_rate()` turns byte counters into bits-per-second for admin snapshots.
 
-## 5. Data Flow Details
+### 4.3 Control Plane (`server/control_server.py`)
 
-### 5.1 Join Sequence
-1. Client opens TCP control socket.
-2. Server validates identity and bans, registers the client, and sends a `WELCOME` packet containing chat history, file offers, presenter status, and configuration.
-3. Client acknowledges and begins periodic heartbeats and latency probes.
-4. Admin dashboard snapshot now includes the new participant.
+| Function | Purpose |
+|----------|---------|
+| `start()/stop()` | Bind/unbind the TCP server. |
+| `_handle_client()` | Perform HELLO handshake, send `WELCOME`, process stream with `decode_control_stream()`, and cleanly unregister on exit. |
+| `_handle_message()` | Dispatch every `ControlAction` (chat, media toggles, presenter grants, typing, reactions, latency updates). |
+| `_broadcast_presence_entry()` | Refresh overlay data after local state changes. |
+| `force_disconnect()` | Kick users on admin request, broadcast `USER_LEFT`, purge media sockets, and ban the username. |
 
-### 5.2 File Upload Life Cycle
-1. User drops a file onto the browser UI; the client runtime begins a TCP upload session.
-2. Each chunk is acknowledged by the server; progress updates are broadcast to other participants.
-3. When complete the server emits a `FILE_OFFER` event; peers can download directly from the file server.
-4. On shutdown or manual cleanup the storage purge removes persisted chunks and logs the outcome.
+### 4.4 Media Servers
 
-### 5.3 Shutdown Life Cycle
-1. Admin clicks **Stop server & clear files**.
-2. Server marks shutdown as requested, disconnects participants with a reason payload, cancels background watchers, and stops every media service in order.
-3. `file_server.cleanup_storage()` purges residual artifacts.
-4. Admin API reports `in_progress` if additional shutdown requests arrive before completion.
+**Audio (`server/audio_server.py`)**
 
-## 6. Technology Stack
+| Function | Summary |
+|----------|---------|
+| `start()/stop()` | Manage UDP transport and the background `_mix_loop()` task. |
+| `datagram_received()` | Handle registration handshakes and ingest PCM frames tagged with `MediaFrameHeader`. |
+| `_enqueue()` | Buffer per-user frames while holding `_lock` to avoid race conditions. |
+| `_mix_loop()` | Every 20 ms, mix all other users’ frames and send individualized streams back. |
+| `remove_user()` | Drop buffers and address bindings when a participant leaves. |
 
-- **Python 3.10+** for both client and server runtimes ensures consistent standard library features and typing support.
-- **AsyncIO** provides cooperative multitasking; every network service awaits events without blocking others.
-- **FastAPI + Uvicorn** power both the admin API and the embedded client UI server, offering type hints, automatic docs, and a predictable concurrency model.
-- **OpenCV / NumPy / PyAV / SoundDevice** deliver media capture, encoding, and playback across platforms.
-- **Jinja2 + Vanilla JS** underpin the admin dashboard and participant UI so operators can customize layouts without adopting a full framework.
-- **RotatingFileHandler** (optional) keeps server logs bounded when long-running sessions are expected.
+**Video (`server/video_server.py`)**
 
-## 7. Deployment Model
+| Function | Summary |
+|----------|---------|
+| `start()/stop()` | Manage UDP socket lifecycle. |
+| `datagram_received()` | Register senders and blindly relay encoded JPEG frames to every other peer. |
+| `remove_user()` | Purge address when control plane reports a disconnect. |
 
-- **Server process**: Started via `python -m server` or distributed as a PyInstaller executable. Ports for control, audio, video, screen, file, latency, and admin dashboard are configurable at launch.
-- **Client process**: Started via `python -m client` or as a packaged binary. Runs a local HTTP server (default port 8100) that renders the UI and exposes REST endpoints the browser can call.
-- **Packaging**: `scripts/build_executables.py` bundles both sides into standalone executables. Assets are embedded so no separate installation steps are required.
+**Screen (`server/screen_server.py`)**
 
-## 8. Security and Resilience
+| Function | Summary |
+|----------|---------|
+| `start()/stop()` | Manage TCP listener. |
+| `_handle_connection()` | Authenticate presenter (`SessionManager.is_presenter()`), broadcast `SCREEN_CONTROL` state, relay base64 frames as `SCREEN_FRAME`. |
+| `_read_json()/ _read_frame()` | Framing helpers wrapping TCP byte streams in length-prefixed payloads. |
 
-- **Perimeter enforcement**: Rely on firewall rules, VLAN segmentation, or VPN policies to control access. Because all traffic is LAN-local, administrators retain full control over routing.
-- **Session integrity**: Duplicate usernames, banned users, and invalid handshakes are rejected during the HELLO stage.
-- **Fault tolerance**: Heartbeat watcher identifies stalled clients and clears them, preventing zombie entries in the session list.
-- **Observability**: Admin dashboard exposes snapshots, log tails, storage usage, and event exports to aid troubleshooting.
-- **Graceful recovery**: Clients automatically reconnect with backoff and display a reconnect banner in the UI. Operators can always initiate a controlled shutdown that clears residual state.
+**Latency (`server/latency_server.py`)**
 
-## 9. Extensibility Notes
+| Function | Summary |
+|----------|---------|
+| `LatencyServer.start()/stop()` | Spin up UDP responder with optional pre-shared key. |
+| `_LatencyProtocol.datagram_received()` | Validate key, echo timestamps, and guard against malformed payloads. |
 
-- New media types can be added by following the existing pattern: introduce a service module, register it in the main server start/stop sequence, and expose control actions via the session manager.
-- Custom authentication or directory integration can wrap the control handshake without disturbing media transports.
-- Observability hooks (metrics, structured logs) can piggyback on the admin dashboard by extending the state snapshot payloads.
+### 4.5 File Transfer (`server/file_server.py`)
 
----
+| Function | Summary |
+|----------|---------|
+| `start()/stop()` | Bind TCP file port; cleanup storage on shutdown. |
+| `_handle_upload()` | Receive metadata, stream chunks to disk, broadcast progress, and register `StoredFile`. |
+| `_handle_download()` | Serve metadata then stream file contents; sends empty chunk to terminate. |
+| `list_files()` / `get_file()` | Provide metadata for `FILE_OFFER` responses and downloads. |
+| `cleanup_storage()` | Remove tracked files and stray artifacts; invoked on shutdown and by admin tasks. |
 
-This architecture emphasizes predictable local performance, straightforward administration, and a shutdown story that always leaves storage clean. The separation between control, media, and UI surfaces keeps responsibilities clear and simplifies future enhancements.
+### 4.6 Admin & Observability (`server/admin_dashboard.py`)
+
+| Symbol | Summary |
+|--------|---------|
+| `_InMemoryLogHandler` | Captures recent log lines for `/api/state` log tail. |
+| `AdminDashboard` | FastAPI app exposing HTML front-end and JSON APIs (state snapshots, time limit, notices, kicks, shutdown, event export). |
+| `AdminServer` | Background runner that boots Uvicorn, keeps it alive, and supports graceful stop. |
+
+### 4.7 Client Runtime (`client/app.py`)
+
+| Function/Class | Summary |
+|----------------|---------|
+| `ClientApp.__init__()` | Initializes service clients, presence caches, WebSocket hub, reconnection state, and UI routes. |
+| `_configure_routes()` | Mounts static assets, exposes REST endpoints (`/api/config`, `/api/files/*`), and sets up WebSocket control bridge. |
+| `WebSocketHub` | Manages browser connections; `broadcast()` sends UI updates (chat, files, presence). |
+| `LatencyProbe` (`start()`, `_send_probe()`, `_handle_packet()`) | Periodically measures round-trip delay and reports to control channel. |
+| File APIs (`upload_file`, `download_file`) | Wrap `FileClient` calls, relay progress, enforce size limits (`MAX_UPLOAD_SIZE_BYTES`). |
+| UI message handlers (`_handle_ui_message`, `_apply_server_event`, `_build_snapshot`) | Synchronize client state with WebSocket UI. |
+| Reconnect logic (`_schedule_reconnect`, `_connect_control`) | Implements exponential backoff and status banners. |
+| Time limit enforcement (`_apply_time_limit`, `_maybe_schedule_time_limit_leave`) | Aligns client shutdown with server-side timers. |
+
+### 4.8 Client Control Plane (`client/control_client.py`)
+
+| Function | Summary |
+|----------|---------|
+| `connect()` | Open TCP stream, send `HELLO`, spin up send/receive coroutines, start heartbeat loop. |
+| `send()` / `send_chat()` / `send_typing()` / `send_hand_status()` / `send_reaction()` / `send_latency_update()` | Encode `ControlAction` messages and enqueue them for `_send_loop()`. |
+| `_recv_loop()` | Decode control stream, dispatch to callbacks, manage disconnect reasons. |
+| `_heartbeat_loop()` | Send periodic `HEARTBEAT` actions. |
+
+### 4.9 Client Media Helpers
+
+- **`client/audio_client.py`**
+    - `start()/stop()` configure audio streams and UDP transport.
+    - `_capture_callback()` and `_playback_callback()` interface with `sounddevice` to ship/consume PCM frames.
+    - `set_capture_enabled()` toggles mic capture without tearing down playback.
+
+- **`client/video_client.py`**
+    - `start()/stop()` manage UDP endpoint and capture task.
+    - `_capture_loop()` reads OpenCV frames, encodes JPEG, emits base64 for UI rendering, and sends binary frames to server.
+    - `update_peers()` maps CRC32 `stream_id` values to usernames for downstream decoding.
+
+- **`client/screen_client.py`**
+    - `start()/stop()` wrap asynchronous screen capture loop.
+    - `_run()` handles handshake, capture via `mss`, JPEG encoding, and send cadence.
+    - `_write_frame()` and `_send_json()` enforce length-prefixed framing.
+
+- **`client/file_client.py`**
+    - `upload()` streams multipart data, invokes optional progress callback, and handles server acknowledgements.
+    - `download()` returns metadata plus an async generator for chunked consumption.
+
+### 4.10 Front-End Assets (`assets/`)
+
+| Symbol | Summary |
+|--------|---------|
+| `renderChatInputOverlay()` | Mirrors chat text into overlay with mention chips and placeholder fallback. |
+| `handleChatInputChange()` | Drives mention autocomplete, filters out false positives (emails), and syncs overlay. |
+| `insertMention()` | Inserts deduplicated mentions, focuses cursor, and triggers highlight animation. |
+| `parseMentions()` | Extracts valid usernames using `/@([A-Za-z0-9_-]+)/g` and cross-references the participant set. |
+| `flashMentionToken()` | Adds the `.flash` CSS class so repeated mentions pulse instead of duplicating. |
+| `setupNotificationBadges()` / `clearNotificationsForActiveTab()` | Manage chat/file unread counters. |
+| `updatePresenceEntry()` | Consolidates typing, hand-raise, and media status updates into a single UI refresh. |
+| `handleReactionSelection()` | Sends emoji through control channel and replays them locally with rate limiting. |
+
+CSS (`assets/styles.css`) introduces:
+- Wider chat sidebar (max-width 380px) for mention readability.
+- `.mention-token` styling, overlay line-height synchronization, and `.flash` animation (`@keyframes mentionFlash`).
+- Transparent input background to let overlay text replace the raw textarea text.
+
+### 4.11 Tests (`tests/`)
+
+| File | Coverage |
+|------|----------|
+| `test_protocol.py` | Validates control message encoding/decoding and dataclass helpers. |
+| `test_session_manager.py` | Exercises registration, chat history filtering, time limits, hand raises, and latency updates. |
+| `test_control_server.py` | Integration-style tests ensuring HELLO handshakes, message routing, and bans behave. |
+| `test_client_time_limit.py` | Ensures client countdown logic respects expiring limits. |
+
+## 5. UX Details & Micro Features
+
+- Mention popup sticks to caret location, supports hyphenated names, and avoids ghost overlays by toggling `hidden` class and syncing overlay text.
+- Duplicate mentions flash in place instead of re-inserting (`flashMentionToken`).
+- Typing indicators collapse multiple users into friendly strings (“Alice and Bob are typing…”).
+- Latency badge color-codes thresholds (<=120 ms good, <=250 ms warn, otherwise red) and shows jitter when available.
+- Drag-and-drop overlay (`#drag-overlay`) prevents accidental uploads and guides users before joining.
+- Chat/file tab badges avoid spamming the user once the pane is active (`suppressChatNotifications`).
+
+## 6. Build & Deployment Notes
+
+- `scripts/build_executables.py` wraps PyInstaller invocations for both client and server specs under `build/spec/`.
+- `scripts/cluster_launcher.py` demonstrates multi-instance orchestration for lab testing.
+- `pyproject.toml` pins runtime dependencies (FastAPI, sounddevice, OpenCV, MSS, etc.) and includes optional extras for packaging.
+
+## 7. Operational Guidance
+
+- Start server: `python -m server --host 0.0.0.0 --port 8765 --admin-port 8080` (match the actual CLI options defined in `server/__main__.py`).
+- Start client: `python -m client --server 192.168.1.10 --username Alice`. Browser UI launches automatically (`webbrowser.open()` in `ClientApp.start_local_ui()`).
+- Use firewall rules to scope UDP ports for audio/video/latency if the LAN is shared.
+- Shutdown best practice: call `/api/actions/shutdown` from the admin UI; this triggers `SessionManager.disconnect_all()` so no socket leaks remain.
+
+## 8. Testing & Validation Workflow
+
+- Unit tests can be executed with `pytest`. Focus on control/session tests after protocol changes and run `test_client_time_limit.py` when adjusting countdown logic.
+- Manual smoke checks:
+    1. Join two clients, toggle mic/video, verify presence updates.
+    2. Type `@` to confirm mention autocomplete, ensure duplicate prevention by clicking the same user twice.
+    3. Upload a file and verify broadcast to remote peer plus admin dashboard storage stats.
+    4. Trigger admin time limit and confirm auto-disconnect message.
+
+This reference should give new contributors and operators enough depth to understand not only where each feature lives, but also how its functions collaborate across the Python back-end and browser front-end.

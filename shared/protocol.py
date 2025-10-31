@@ -55,25 +55,41 @@ class ControlAction(str, Enum):
 
 @dataclass(slots=True)
 class ChatMessage:
-    """Payload for chat broadcasts."""
+    """Payload for chat messages.
+
+    If `recipients` is None or an empty list, the message is a broadcast to everyone.
+    Otherwise, it's targeted to the listed recipients (in addition to the sender, who
+    will always receive their own message echo from the server).
+    """
 
     sender: str
     message: str
     timestamp_ms: int
+    recipients: Optional[list[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "sender": self.sender,
             "message": self.message,
             "timestamp_ms": self.timestamp_ms,
         }
+        # Only include recipients if present and non-empty to keep backwards compatibility
+        if self.recipients:
+            payload["recipients"] = list(self.recipients)
+        return payload
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ChatMessage":
+        recipients = data.get("recipients")
+        if isinstance(recipients, list):
+            recipients = [str(x) for x in recipients if isinstance(x, str) and x.strip()]
+        else:
+            recipients = None
         return cls(
             sender=data["sender"],
             message=data["message"],
             timestamp_ms=int(data["timestamp_ms"]),
+            recipients=recipients if recipients else None,
         )
 
 

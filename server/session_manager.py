@@ -245,6 +245,24 @@ class SessionManager:
         async with self._lock:
             return list(self._chat_history)
 
+    async def get_chat_history_for(self, username: str) -> list[ChatMessage]:
+        """Return chat messages visible to a specific user.
+
+        Rules:
+        - Broadcast messages (no recipients specified) are visible to everyone.
+        - Targeted messages are visible only to the sender and the listed recipients.
+        """
+        async with self._lock:
+            visible: list[ChatMessage] = []
+            for msg in self._chat_history:
+                if not msg.recipients:
+                    visible.append(msg)
+                    continue
+                # targeted message
+                if msg.sender == username or username in msg.recipients:
+                    visible.append(msg)
+            return visible
+
     async def get_presence_entry(self, username: str) -> Optional[dict[str, object]]:
         async with self._lock:
             client = self._clients.get(username)
